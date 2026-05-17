@@ -1,0 +1,29 @@
+# Ignore everything by default (whitelist approach)
+*
+
+# Always track this file
+!.gitignore
+
+# Root-level code files
+!*.py
+!*.r
+!*.R
+
+# cursorrules config
+!cursorrules
+
+# --- BlenderConvert ---
+!BlenderConvert/
+BlenderConvert/*
+!BlenderConvert/*.py
+
+# --- CSVconvert ---
+!CSVconvert/
+CSVconvert/*
+!CSVconvert/*.py
+
+# --- Rcode ---
+!Rcode/
+Rcode/*
+!Rcode/*.r
+!Rcode/*.R

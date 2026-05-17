@@ -1,0 +1,77 @@
+# Project Context: Computational Modelling of Apophis (SCI4501 Honours Thesis)
+# Monash University | Supervisor: Daniel
+
+## Project Overview
+This project models the tidal and structural response of asteroid 99942 Apophis
+during its 2029 Earth flyby using smoothed particle hydrodynamics (SPH) and
+discrete element method (DEM) simulations. The goal is to compare three
+structural representations of Apophis and assess which physical parameters most
+drive divergence in outcomes.
+
+## Research Goals
+1. PRIMARY: Compare three Apophis structural models:
+   - Point mass (baseline)
+   - Extended fluid body (SPH via PHANTOM)
+   - DEM bilobed rubble-pile (pkdgrav with SSDEM)
+2. SECONDARY: Sensitivity analysis to identify which input parameters most
+   influence simulation outcomes (bulk density, porosity, cohesive strength)
+
+## Simulation Codes
+- **PHANTOM**: SPH code used for the fluid-body representation.
+  - IMPORTANT: PHANTOM has NO native solid-body mechanics — no deviatoric
+    stress, plastic yield, or fracture models. It treats Apophis as a fluid,
+    not a solid or true rubble-pile. This is a known limitation.
+  - Output: splash dump files (.h5 / binary)
+- **pkdgrav (with SSDEM)**: Handles granular/DEM dynamics for the rubble-pile
+  model. Supervisor Daniel runs and maintains this code.
+  - Output: binary .ss files; use splash2csv to convert
+- **sarracen**: Python library for reading PHANTOM splash dumps into
+  pandas DataFrames / HDF5 / CSV for post-processing and Blender import
+
+## Key Physical Parameters
+- Bulk density (target ~1300 kg/m³ for Apophis)
+- Porosity
+- Cohesive strength / tensile strength
+- Apophis bilobed shape and mass distribution
+- Flyby orbital parameters (closest approach ~31,000 km, April 2029)
+
+## Sensitivity Analysis Methods (Secondary Goal)
+- Latin Hypercube Sampling (LHS) for parameter space coverage
+- Morris screening for parameter ranking
+- Sobol indices for variance decomposition
+- Key question: which of density / porosity / cohesion drives outcome divergence?
+
+## Visualisation Pipeline
+PHANTOM output → sarracen → CSV/HDF5 → Blender (rendered simulation output)
+
+## Codebase Conventions
+- Python preferred for post-processing and analysis scripts
+- Use sarracen for all PHANTOM dump I/O (avoid raw binary parsing)
+- Keep simulation config files version-controlled
+- Separate directories for: /simulations, /analysis, /figures, /thesis
+
+## Literature & Key References
+- Hirabayashi & Kim 2021: FEM stress modelling of Apophis
+- DeMartini et al.: tidal resurfacing with DEM/pkdgrav
+- Raducan et al., Thomas/Cheng et al., Luther et al., Stickle et al.: DART
+  mission material model context and lessons (meteorite analogue bias,
+  homogeneous continuum limitations)
+- OSIRIS-APEX mission science goals (in-situ Apophis characterisation)
+- Core research gap: mismatch between impact-validated material models and
+  tidal loading conditions
+
+## Thesis Status (update as needed)
+- [ ] PHANTOM point-mass and fluid-body simulations
+- [ ] pkdgrav DEM bilobed simulation (with Daniel)
+- [ ] Sensitivity analysis runs
+- [ ] sarracen → Blender visualisation pipeline
+- [ ] Literature review (draft in progress)
+- [ ] Thesis writing phases: planning → simulations → analysis → writing
+
+## AI Assistant Instructions
+- Assume familiarity with SPH, DEM, and planetary science terminology
+- Do not oversimplify — this is Honours-level research
+- When writing or editing thesis prose, target H1 quality
+- Flag if a suggestion conflicts with PHANTOM's known limitations (no solid mechanics)
+- Prefer Python solutions for data analysis; numpy, pandas, matplotlib, sarracen
+- When uncertain about simulation specifics, ask rather than assume do not make assumptions
