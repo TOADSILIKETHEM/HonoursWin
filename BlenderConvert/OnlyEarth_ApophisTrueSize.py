@@ -64,7 +64,7 @@ APOPHIS_COLLECTION_NAME = None    # or e.g. 'Apophis' to append a collection
 APOPHIS_BLEND_APPEND_ALL_IF_UNMATCHED = True
 APOPHIS_MODEL_REFERENCE_RADIUS_BU = 1.0
 APOPHIS_AUTO_REFERENCE_RADIUS = True
-APOPHIS_TARGET_RADIUS_BU = None  # Use true physical radius from CSV — camera-centric handler keeps it float32-safe
+APOPHIS_TARGET_RADIUS_BU = None  # Use true physical radius from CSV — Apophis-centric keyframes keep mesh float32-safe at origin
 APOPHIS_CENTER_OBJECT_NAME = 'Apophis'
 APOPHIS_AUTO_CENTER = True
 APOPHIS_AUTO_SCALE = True
@@ -155,6 +155,24 @@ def get_body_radius(row):
             except (TypeError, ValueError):
                 continue
     return DEFAULT_RADIUS
+
+
+def _location_bu(row):
+    """Absolute position in Blender units from a CSV row."""
+    return (
+        row['x_au'] * SCALE,
+        row['y_au'] * SCALE,
+        row['z_au'] * SCALE,
+    )
+
+
+def _apophis_centric_location(body_row, apophis_row, body_index):
+    """Location with Apophis at world origin for this timestep."""
+    if body_index == APOPHIS_INDEX:
+        return (0.0, 0.0, 0.0)
+    bx, by, bz = _location_bu(body_row)
+    ax, ay, az = _location_bu(apophis_row)
+    return (bx - ax, by - ay, bz - az)
 
 
 def smooth_location_fcurves(obj):
@@ -566,17 +584,16 @@ def import_earth_model(empty_obj, earth_row):
 
 
 # -- First pass: create one object per body ------------------------------------
+# Positions are Apophis-centric (baked into keyframes) so saved .blend files
+# keep Apophis at the world origin without a runtime frame handler.
 first_df = pd.read_csv(csv_files[0])
+first_apophis_row = first_df.iloc[APOPHIS_INDEX]
 
 for i, row in first_df.iterrows():
     if i not in IMPORT_CSV_INDICES:
         continue
     name = CSV_BODY_NAMES[i] if i < len(CSV_BODY_NAMES) else f'Body_{i}'
-    start_loc = (
-        row['x_au'] * SCALE,
-        row['y_au'] * SCALE,
-        row['z_au'] * SCALE,
-    )
+    start_loc = _apophis_centric_location(row, first_apophis_row, i)
 
     model_cfg = MODEL_BODY_CONFIG_BY_INDEX.get(i)
     if model_cfg is not None:
@@ -592,9 +609,10 @@ for i, row in first_df.iterrows():
         obj = bpy.context.object
         obj.name = name
 
-# -- Second pass: keyframe positions across all timesteps ----------------------
+# -- Second pass: keyframe Apophis-centric positions across all timesteps ------
 for frame_num, csv_file in enumerate(csv_files, start=1):
     df = pd.read_csv(csv_file)
+    apophis_row = df.iloc[APOPHIS_INDEX]
     bpy.context.scene.frame_set(frame_num)
 
     for i, row in df.iterrows():
@@ -603,11 +621,7 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
         name = CSV_BODY_NAMES[i] if i < len(CSV_BODY_NAMES) else f'Body_{i}'
         obj = bpy.data.objects.get(name)
         if obj:
-            obj.location = (
-                row['x_au'] * SCALE,
-                row['y_au'] * SCALE,
-                row['z_au'] * SCALE,
-            )
+            obj.location = _apophis_centric_location(row, apophis_row, i)
             obj.keyframe_insert(data_path='location', frame=frame_num)
 
 # -- Third pass: smooth all F-curves -------------------------------------------
@@ -621,41 +635,11 @@ if SMOOTH_INTERPOLATION:
             smooth_location_fcurves(obj)
 
 
-# -- Camera-centric handler ---------------------------------------------------
-# Every frame, shift the entire scene so the Apophis empty sits at the world
-# origin. This keeps Apophis's mesh within ~1 BU of (0,0,0) at all times,
-# where float32 precision is finest (~1.2e-7 BU per step). All relative
-# positions between bodies are preserved exactly — only the common offset
-# changes. Parent the render camera to the Apophis empty to follow the flyby.
-
-def _recenter_to_apophis(scene):
-    apophis_empty = bpy.data.objects.get('Apophis')
-    if apophis_empty is None:
-        return
-    offset = apophis_empty.location.copy()
-    if offset.length < 1e-10:
-        return
-    # Shift every parentless object except Apophis itself.
-    for obj in scene.objects:
-        if obj.parent is None and obj is not apophis_empty:
-            obj.location -= offset
-    apophis_empty.location = (0.0, 0.0, 0.0)
-
-
-# Register handler idempotently so re-running the script does not stack copies.
-_handler_name = _recenter_to_apophis.__name__
-bpy.app.handlers.frame_change_post[:] = [
-    h for h in bpy.app.handlers.frame_change_post
-    if getattr(h, '__name__', None) != _handler_name
-]
-bpy.app.handlers.frame_change_post.append(_recenter_to_apophis)
-
-# Run once immediately so frame 1 is already recentred after import.
-_recenter_to_apophis(bpy.context.scene)
-
 print(
-    'Done - camera-centric handler registered.\n'
-    'Apophis sits at the world origin each frame; all bodies use true physical scale.\n'
+    'Done - Apophis-centric coordinates baked into keyframes.\n'
+    'Apophis is at the world origin on every frame; Sun/Earth use relative positions.\n'
+    'Save the .blend to keep centering after reopen (no Python handler required).\n'
     'Tip: parent your camera to the Apophis empty for close-approach shots.\n'
+    'Re-run on a fresh scene to regenerate; old .blend files from the handler version need re-import.\n'
     'Press Space to play the animation.'
 )
