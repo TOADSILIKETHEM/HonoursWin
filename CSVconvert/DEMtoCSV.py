@@ -48,6 +48,14 @@ GRAIN_REFF_THRESHOLD_KM = 1.0
 # tightly packed as expected for a rubble pile).  Adjust freely — this
 # visualisation is not to scale by design.
 GRAIN_VIS_SCALE = 50.0
+
+# PHANTOM writes two dump types:
+#   Full dumps  (every nfulldump timesteps) — all 74 sinks present.
+#   Mini dumps  (all others)               — only ~17 sinks in the file;
+#               the DEM grain block is incomplete and unusable.
+# Dumps with fewer than MIN_DEM_GRAINS DEM particles are treated as mini
+# dumps and skipped.  Set to just below np_apophis (64).
+MIN_DEM_GRAINS = 60
 # ─────────────────────────────────────────────────────────────────────────────
 
 AU_IN_CM = 1.495978707e13
@@ -81,8 +89,8 @@ for dump in dump_files:
         n_sinks  = len(sdf_sinks)
         n_dem    = n_sinks - N_BODIES   # number of DEM grains (should be 64)
 
-        if n_dem <= 0:
-            print(f"  [{dump}] Only {n_sinks} sinks — fewer than N_BODIES={N_BODIES}, skipping.")
+        if n_dem < MIN_DEM_GRAINS:
+            print(f"  [{os.path.basename(dump)}] mini dump ({n_sinks} sinks, {n_dem} DEM grains) — skipped")
             continue
 
         # Sanity check: confirm the split looks right via Reff threshold
@@ -181,12 +189,15 @@ for dump in dump_files:
             "z_vis":      z_rel_km * GRAIN_VIS_SCALE,
             "Reff_vis":   reff_km  * GRAIN_VIS_SCALE,
             "m":          g["m"].values,
-            "vx":         g["vx"].values,
-            "vy":         g["vy"].values,
-            "vz":         g["vz"].values,
-            "spinx":      g["spinx"].values,
-            "spiny":      g["spiny"].values,
-            "spinz":      g["spinz"].values,
+            # Velocity and spin are only present in full dumps (every nfulldump
+            # timesteps).  Mini dumps omit them; fill with NaN so the CSV
+            # schema stays consistent across all frames.
+            "vx":    g["vx"].values    if "vx"    in g.columns else np.nan,
+            "vy":    g["vy"].values    if "vy"    in g.columns else np.nan,
+            "vz":    g["vz"].values    if "vz"    in g.columns else np.nan,
+            "spinx": g["spinx"].values if "spinx" in g.columns else np.nan,
+            "spiny": g["spiny"].values if "spiny" in g.columns else np.nan,
+            "spinz": g["spinz"].values if "spinz" in g.columns else np.nan,
         })
 
         # ── Write CSVs ────────────────────────────────────────────────────────
@@ -207,12 +218,12 @@ for dump in dump_files:
             f"({N_BODIES} bodies + {n_dem} DEM grains)  t={time_val}\n"
             f"    Apophis CoM: "
             f"({com_x*to_au:.6f}, {com_y*to_au:.6f}, {com_z*to_au:.6f}) AU\n"
-            f"    Mean grain Reff: {mean_reff:.4f} km  "
-            f"→ Reff_vis: {mean_reff*GRAIN_VIS_SCALE:.2f} BU\n"
-            f"    Body max radius (vis): {vis_extent:.2f} BU  "
+            f"    Mean grain Reff: {mean_reff:.4f} km "
+            f"Reff_vis: {mean_reff*GRAIN_VIS_SCALE:.2f} BU\n"
+            f"    Body max radius (vis): {vis_extent:.2f} BU "
             f"(GRAIN_VIS_SCALE={GRAIN_VIS_SCALE})\n"
-            f"    → {bodies_out}\n"
-            f"    → {grains_out}\n"
+            f"    Written: {bodies_out}\n"
+            f"            {grains_out}\n"
         )
 
     except Exception as e:
