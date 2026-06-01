@@ -1,21 +1,31 @@
 import bpy
+import mathutils
 import pandas as pd
 import glob
 import os
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 # Path to the dem_grains_output/ folder produced by DEMtoCSV.py.
-# Each CSV contains one row per DEM grain with x_vis/y_vis/z_vis columns
-# (body-frame positions pre-scaled for Blender) and Reff_vis (sphere radius).
-GRAINS_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/dem_grains_output/'
+GRAINS_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/run_0001_grains_output/'
 
-# Interpolation applied to all grain F-curves between keyframes.
+# Path to the bodies output folder — filenames match GRAINS_CSV_DIR.
+# Used to read the Sun and Apophis absolute positions and animate the Sun lamp.
+# Set to '' or a nonexistent path to skip the Sun lamp entirely.
+BODIES_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/run_0001_bodies_output/'
+
+# Sun lamp settings.
+# SUN_LAMP_ENERGY: irradiance in Watts — scale to taste for your render setup.
+# SUN_LAMP_ANGLE: angular radius of the Sun disc in radians (controls shadow softness).
+#   0.00931 rad ≈ 0.53°, the Sun's angular radius as seen from ~1 AU away.
+SUN_LAMP_ENERGY = 10.0
+SUN_LAMP_ANGLE  = 0.00931
+
+# Interpolation applied to all grain and Sun lamp F-curves between keyframes.
 SMOOTH_INTERPOLATION = True
 INTERPOLATION_MODE   = 'BEZIER'   # 'BEZIER' or 'LINEAR'
 HANDLE_MODE          = 'AUTO_CLAMPED'
 
 # Material colour for the rubble-pile grains (RGBA, 0-1).
-# Change to taste — a warm grey works well for a rocky asteroid.
 GRAIN_COLOR = (0.35, 0.30, 0.25, 1.0)
 # ─────────────────────────────────────────────────────────────────────────────
 # COORDINATE NOTE
@@ -25,8 +35,11 @@ GRAIN_COLOR = (0.35, 0.30, 0.25, 1.0)
 # They are NOT in AU — do not multiply by a solar-system SCALE here.
 # Reff_vis is the grain radius in the same scaled units.
 #
-# The visualisation is not to physical scale by design: at true scale, all 64
-# grains would collapse to a single Blender coordinate due to float32 limits.
+# The Sun direction is computed from the bodies CSV using absolute km positions:
+#   sun_dir = (sun_km - apophis_com_km).normalised()
+# Because the body frame is only translated (not rotated) relative to the solar
+# system frame, this direction vector is valid in both frames and is used
+# directly to orient the Sun lamp.
 # ─────────────────────────────────────────────────────────────────────────────
 
 csv_files = sorted(glob.glob(os.path.join(GRAINS_CSV_DIR, '*.csv')))
@@ -38,6 +51,23 @@ if not csv_files:
     )
 
 print(f'Found {len(csv_files)} grain CSV(s).')
+
+# Check bodies folder once up front — Sun lamp is skipped if it is missing.
+_bodies_available = os.path.isdir(BODIES_CSV_DIR)
+if not _bodies_available:
+    print(
+        f'WARNING: BODIES_CSV_DIR not found ({BODIES_CSV_DIR})\n'
+        '  Sun lamp will be skipped. Set BODIES_CSV_DIR to dem_bodies_output/ to enable it.'
+    )
+
+
+def _bodies_csv_for(grains_path):
+    """Return the matching bodies CSV path, or None if it does not exist."""
+    if not _bodies_available:
+        return None
+    p = os.path.join(BODIES_CSV_DIR, os.path.basename(grains_path))
+    return p if os.path.exists(p) else None
+
 
 # ── Shared material ───────────────────────────────────────────────────────────
 mat = bpy.data.materials.get('DEM_Grain')
@@ -51,12 +81,13 @@ if mat is None:
         bsdf.inputs['Metallic'].default_value   = 0.0
 
 
-def smooth_location_fcurves(obj):
+def _smooth_fcurves(obj, data_path):
+    """Apply INTERPOLATION_MODE to all F-curves on obj matching data_path."""
     if not obj.animation_data or not obj.animation_data.action:
         return
-    action   = obj.animation_data.action
-    fcurves  = []
-    legacy   = getattr(action, 'fcurves', None)
+    action  = obj.animation_data.action
+    fcurves = []
+    legacy  = getattr(action, 'fcurves', None)
     if legacy is not None:
         fcurves.extend(list(legacy))
     else:
@@ -65,13 +96,30 @@ def smooth_location_fcurves(obj):
                 for bag in getattr(strip, 'channelbags', []):
                     fcurves.extend(list(getattr(bag, 'fcurves', [])))
     for fc in fcurves:
-        if fc.data_path != 'location':
+        if fc.data_path != data_path:
             continue
         for kp in fc.keyframe_points:
             kp.interpolation = INTERPOLATION_MODE
             if INTERPOLATION_MODE == 'BEZIER':
                 kp.handle_left_type  = HANDLE_MODE
                 kp.handle_right_type = HANDLE_MODE
+
+
+# ── Create Sun lamp ───────────────────────────────────────────────────────────
+# A Blender SUN lamp emits infinite parallel rays — position is irrelevant,
+# only rotation matters.  We orient its local -Z axis toward the Sun each
+# frame so the lighting angle matches the physical Sun direction exactly.
+sun_lamp_obj = None
+if _bodies_available:
+    existing = bpy.data.objects.get('DEM_SunLight')
+    if existing:
+        bpy.data.objects.remove(existing, do_unlink=True)
+    lamp_data        = bpy.data.lights.new('DEM_SunLight', 'SUN')
+    lamp_data.energy = SUN_LAMP_ENERGY
+    lamp_data.angle  = SUN_LAMP_ANGLE
+    sun_lamp_obj     = bpy.data.objects.new('DEM_SunLight', lamp_data)
+    bpy.context.scene.collection.objects.link(sun_lamp_obj)
+    print('Sun lamp "DEM_SunLight" created.')
 
 
 # ── First pass: read frame 1 and create one sphere per grain ──────────────────
@@ -96,9 +144,9 @@ for _, row in first_df.iterrows():
     else:
         obj.data.materials.append(mat)
 
-print(f'Spheres created.')
+print('Spheres created.')
 
-# ── Second pass: keyframe positions across all CSV frames ─────────────────────
+# ── Second pass: keyframe grain positions and Sun lamp rotation ───────────────
 print(f'Keyframing {len(csv_files)} frames ...')
 
 bpy.context.scene.frame_start = 1
@@ -121,16 +169,38 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
         )
         obj.keyframe_insert(data_path='location', frame=frame_num)
 
+    # Orient the Sun lamp using the Sun–Apophis direction from the bodies CSV.
+    if sun_lamp_obj is not None:
+        bodies_path = _bodies_csv_for(csv_file)
+        if bodies_path:
+            bdf     = pd.read_csv(bodies_path)
+            sun_row = bdf.loc[bdf['name'] == 'Sun']
+            apo_row = bdf.loc[bdf['name'] == 'Apophis']
+            if not sun_row.empty and not apo_row.empty:
+                sun_km  = sun_row[['x_km', 'y_km', 'z_km']].values[0]
+                apo_km  = apo_row[['x_km', 'y_km', 'z_km']].values[0]
+                sun_rel = sun_km - apo_km   # vector from Apophis to Sun (km)
+                sun_dir = mathutils.Vector(sun_rel.tolist()).normalized()
+                # Track local -Z toward the Sun (SUN lamp emits along -Z by default).
+                rot = sun_dir.to_track_quat('-Z', 'Y').to_euler()
+                sun_lamp_obj.rotation_euler = rot
+                sun_lamp_obj.keyframe_insert(
+                    data_path='rotation_euler', frame=frame_num
+                )
+
 # ── Third pass: smooth F-curves ───────────────────────────────────────────────
 if SMOOTH_INTERPOLATION:
     print('Smoothing F-curves ...')
     for gid in range(n_grains):
         obj = bpy.data.objects.get(f'DEM_Grain_{gid:03d}')
         if obj:
-            smooth_location_fcurves(obj)
+            _smooth_fcurves(obj, 'location')
+    if sun_lamp_obj is not None:
+        _smooth_fcurves(sun_lamp_obj, 'rotation_euler')
 
 print(
     f'Done — {n_grains} DEM grains animated over {len(csv_files)} frame(s).\n'
     'Positions are in Apophis body frame (not solar-system AU scale).\n'
-    'Press Space to play. Adjust GRAIN_COLOR or SMOOTH_INTERPOLATION at the top as needed.'
+    'Sun lamp "DEM_SunLight" direction is keyframed from physical PHANTOM positions.\n'
+    'Press Space to play. Tune SUN_LAMP_ENERGY / SUN_LAMP_ANGLE at the top as needed.'
 )

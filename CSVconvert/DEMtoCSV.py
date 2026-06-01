@@ -5,12 +5,16 @@ import pandas as pd
 import numpy as np
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-INPUT_DIR    = "//wsl.localhost/Ubuntu/home/mboyle/Honours/DEMTrial"
-DUMP_PATTERN = "demtrial_*"
+INPUT_DIR    = "//wsl.localhost/Ubuntu/home/mboyle/Honours/sobol/sobol_mass_runs/sobol_20260526_115314_n8_s42_sspd20-35_sobl0-360_saz0-360/run_0002"
+DUMP_PATTERN = "sobol_[0-9]*"
 
-# Two output folders: bodies are compatible with existing Blender scripts
-BODIES_OUTPUT_DIR = "dem_bodies_output"   # 10 solar system bodies + Apophis CoM
-GRAINS_OUTPUT_DIR = "dem_grains_output"   # individual Apophis DEM grains
+# Root folder for all DEM CSV output.  Subfolders are created automatically
+# based on the INPUT_DIR name, so changing INPUT_DIR above is all you need to do.
+BASE_OUTPUT_DIR = r"c:\Users\22boy\OneDrive\Documents\GC-Max_desktop\Honours\Code\DEMCSVs"
+
+_sim_name         = os.path.basename(INPUT_DIR.rstrip('/'))
+BODIES_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, f"{_sim_name}_bodies_output")
+GRAINS_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, f"{_sim_name}_grains_output")
 
 # The first N_BODIES sinks are solar system bodies in this order.
 # Matches PHANTOM's solarsystem setup sink order.
