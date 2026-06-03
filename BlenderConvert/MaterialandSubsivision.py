@@ -1,7 +1,7 @@
 import bpy
 
 # --- Configure these ---
-SOURCE_NAME = "DEM_Grain_521"          # The grain with the texture + subdivision
+SOURCE_NAME = "DEM_Grain_500"          # The grain with the texture + subdivision
 GRAIN_PREFIX = "DEM_Grain_"            # Prefix shared by all grain objects
 # ----------------------
 

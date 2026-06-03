@@ -29,23 +29,82 @@ HANDLE_MODE          = 'AUTO_CLAMPED'
 # Material colour for the rubble-pile grains (RGBA, 0-1).
 GRAIN_COLOR = (0.35, 0.30, 0.25, 1.0)
 
+# Name of the Blender collection that will hold all grain sphere objects.
+# Created automatically if it does not already exist.
+GRAIN_COLLECTION_NAME = 'DEM_Grains'
+
 # Earth 3-D model (Surface, Atmosphere, Clouds from TheEarth.blend).
-EARTH_MODEL_PATH         = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert/TheEarth.blend'
+EARTH_MODEL_PATH         = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert/TheEarth1.blend'
 EARTH_PART_NAMES         = ['Surface', 'Atmosphere', 'Clouds']
 EARTH_PHYSICAL_RADIUS_KM = 6371.0
 
-# Scale for Earth's position and radius relative to the Apophis body frame.
-# 1 BU = 1 / EARTH_VIS_SCALE km.
-# Default 0.005 → Earth at ~190 BU at closest approach (~38 000 km); radius ~32 BU.
-# Increase to push Earth further away; decrease to bring it closer.
-EARTH_VIS_SCALE = 0.005   # BU per km
+
+EARTH_SHELL_SCALE = {
+    'Atmosphere': 1.004,
+    'Clouds':     1.002,
+}
+
+# Scale for Earth's position AND radius relative to the Apophis body frame
+# (BU per km).  Earth's angular size through the camera is SCALE-INDEPENDENT (the
+# mesh radius and the Earth distance both multiply by EARTH_VIS_SCALE, so the
+# ratio cancels).  What the value actually controls is (a) how the volume-scatter
+# atmosphere renders and (b) how far Earth sits from the origin.
+#
+# RENDER TARGET = CYCLES.  Cycles ray-traces: there is NO depth buffer, so no
+# Z-fighting, and no EEVEE froxel range to respect.  The dominant concern is the
+# Atmosphere, which is a VOLUME — its appearance is scale-DEPENDENT because
+# optical depth = density × path length, and shrinking the model shrinks the path
+# (and can drop the shell below Cycles' volume step size → blocky, weak haze).
+# To reproduce the atmosphere EXACTLY as authored in TheEarth1.blend, import the
+# Earth at its native size, i.e. scale_factor = 1.0:
+#
+#   measured authored radius ≈ 1274 BU  (printed in the "Earth layout:" line)
+#   EARTH_VIS_SCALE = 1274 / 6371 ≈ 0.2  →  target_radius = 6371 × 0.2 ≈ 1274 BU
+#   →  scale_factor ≈ 1.0  →  native size, atmosphere untouched.
+#
+# At 0.2 the Earth ends up ~7600 BU away at closest approach (radius 1274 BU),
+# filling ~19° of sky — physically correct framing, and depth-safe for the
+# Solid/EEVEE viewport preview too.
+#
+# WHY NOT OTHER VALUES:
+#   0.005 (previous) shrank the model 40× → atmosphere 40× too thin AND its shell
+#         thinner than Cycles' volume step → blocky/weak haze.
+#   50    put Earth at ~1.9 M BU → broke the rasterized viewport preview
+#         (depth-buffer Z-fighting); irrelevant to Cycles but unnavigable.  Avoid.
+EARTH_VIS_SCALE = 0.2   # BU per km → scale_factor ≈ 1.0 for this model:
+                        # native authored size, so the volume atmosphere is preserved.
+
+# Camera/viewport near & far clip planes (BU), applied automatically at the end.
+# In Cycles clip_end can be large freely (no depth buffer).  clip_start stays
+# moderate (not 1e-7) so the Solid/EEVEE viewport preview you navigate in stays
+# depth-precise.  At EARTH_VIS_SCALE = 0.2 Earth is ~7600 BU away at closest
+# approach and recedes to ~1e7 BU at the flyby edges; clip_end below covers the
+# close-approach window — raise toward ~12 000 000 to keep Earth visible across the
+# entire flyby.  Do NOT run Viewport.py here (it is tuned for the point-mass scene,
+# clip_start 1e-7).
+VIEWPORT_CLIP_START = 0.1
+VIEWPORT_CLIP_END   = 2000000.0
+
+# EEVEE volumetric range/quality for the Earth's volume-scatter atmosphere.
+# NOTE: this affects ONLY the EEVEE viewport/preview — Cycles (the render target)
+# ray-marches volumes directly and ignores all of these.  Kept for versatility so
+# the atmosphere also looks reasonable if you switch to EEVEE.  EEVEE only
+# ray-marches volumes between volumetric_start and volumetric_end (distances FROM
+# THE CAMERA); the default end (100 BU) is far short of Earth (~7600 BU at 0.2), so
+# without this the EEVEE atmosphere renders as blocky froxel garbage.
+VOLUMETRIC_START   = 0.1
+VOLUMETRIC_END     = 50000.0  # must exceed camera→Earth distance (EEVEE only)
+VOLUMETRIC_SAMPLES = 128      # depth slices; higher = smoother, less banding
+VOLUMETRIC_TILE_PX = '2'      # screen-space froxel tile size (finer = less blocky)
 # ─────────────────────────────────────────────────────────────────────────────
 # COORDINATE NOTE
 # ───────────────
 # Grains: x_vis = x_rel_km × GRAIN_VIS_SCALE (set in DEMtoCSV.py, default 50).
 #   Apophis CoM sits at the world origin; grains are within ±25 BU.
 # Earth:  (earth_km - apophis_km) × EARTH_VIS_SCALE.
-#   Same Apophis-at-origin frame; EARTH_VIS_SCALE is independent of GRAIN_VIS_SCALE.
+#   EARTH_VIS_SCALE = 0.2 imports Earth at its native authored size (scale_factor
+#   ≈ 1.0), so the volume-scatter atmosphere renders exactly as in TheEarth1.blend.
+#   Earth sits ~7600 BU away at closest approach.  See the EARTH_VIS_SCALE note above.
 # Sun lamp: rotation only (from normalised Sun–Apophis km vector).
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -128,6 +187,7 @@ class BodyModelConfig:
     auto_center: bool
     auto_scale: bool
     blend_append_all_objects_if_unmatched: bool = False
+    shell_scale: Optional[dict] = None
 
 
 def _get_fallback_radius():
@@ -297,10 +357,22 @@ def _prepare_body_meshes_layout(mesh_objs, empty_obj, cfg, target_radius_bu):
         else:
             print(f'  WARNING: {cfg.body_label} reference radius must be > 0; skipping scale.')
 
+    shell_scale = cfg.shell_scale or {}
+    for obj in mesh_objs:
+        extra = shell_scale.get(_object_base_name(obj.name))
+        if extra and extra != 1.0:
+            Sx = (
+                Matrix.Translation(E)
+                @ Matrix.Diagonal((extra, extra, extra, 1.0))
+                @ Matrix.Translation(-E)
+            )
+            obj.matrix_world = Sx @ obj.matrix_world
+            print(f'  {cfg.body_label}: enlarged "{obj.name}" by ×{extra} (shell clearance).')
+
     sf_str = f'{scale_factor:.6g}' if scale_factor is not None else 'skipped'
     print(
-        f'  {cfg.body_label} layout: target_radius={target_radius_bu:.6g}, '
-        f'reference_radius={reference_radius:.6g} ({ref_source}), scale_factor={sf_str}'
+        f'  {cfg.body_label} layout: measured reference_radius={reference_radius:.6g} BU ({ref_source}), '
+        f'target_radius={target_radius_bu:.6g} BU, scale_factor={sf_str}'
     )
 
 
@@ -387,15 +459,35 @@ if _bodies_available and EARTH_MODEL_PATH and os.path.exists(EARTH_MODEL_PATH):
         center_object_name='Surface',
         auto_center=True,
         auto_scale=True,
+        shell_scale=EARTH_SHELL_SCALE,
     )
     print(f'Importing Earth from {os.path.basename(EARTH_MODEL_PATH)} ...')
     bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
     earth_empty      = bpy.context.object
     earth_empty.name = 'Earth'
     import_body_model(earth_empty, earth_cfg, EARTH_PHYSICAL_RADIUS_KM * EARTH_VIS_SCALE)
+    # The Earth parts (Surface scan, volume-scatter Atmosphere, procedural Clouds)
+    # are appended with link=False, so their authored material/modifier stacks come
+    # across intact.  Do NOT force-add modifiers here — this script never applies
+    # transforms (it uses matrix_world only), so nothing strips them, and forcing a
+    # subsurf would override how the atmosphere/cloud meshes were authored.
+    # NOTE: auto_scale resizes the whole model uniformly.  The Surface texture and
+    # city-light emission are scale-invariant, but the volume-scatter atmosphere is
+    # NOT: its apparent thickness scales with the model size.  With EARTH_VIS_SCALE
+    # = 0.2 the scale_factor is ≈ 1.0, so the Earth is imported at native size and
+    # the atmosphere renders exactly as authored — no tweak needed.  If you change
+    # EARTH_VIS_SCALE, the volume thickness changes (optical depth = density × path):
+    # to compensate, divide the atmosphere's volume density by the scale_factor
+    # printed in the "Earth layout:" line above.
 elif EARTH_MODEL_PATH and not os.path.exists(EARTH_MODEL_PATH):
     print(f'WARNING: EARTH_MODEL_PATH not found ({EARTH_MODEL_PATH}) — Earth skipped.')
 
+
+# ── Create grain collection ───────────────────────────────────────────────────
+grain_col = bpy.data.collections.get(GRAIN_COLLECTION_NAME)
+if grain_col is None:
+    grain_col = bpy.data.collections.new(GRAIN_COLLECTION_NAME)
+    bpy.context.scene.collection.children.link(grain_col)
 
 # ── First pass: read frame 1 and create one sphere per grain ──────────────────
 first_df = pd.read_csv(csv_files[0])
@@ -413,6 +505,10 @@ for _, row in first_df.iterrows():
     )
     obj      = bpy.context.object
     obj.name = name
+
+    for c in list(obj.users_collection):
+        c.objects.unlink(obj)
+    grain_col.objects.link(obj)
 
     if obj.data.materials:
         obj.data.materials[0] = mat
@@ -488,10 +584,54 @@ if SMOOTH_INTERPOLATION:
     if earth_empty is not None:
         _smooth_fcurves(earth_empty, 'location')
 
+# ── Set clip range on all viewports and cameras ───────────────────────────────
+# Earth sits ~7600 BU away at closest approach (radius 1274 BU) and recedes to
+# ~1e7 BU at the flyby edges; grains are within ±25 BU.  clip_end must reach Earth;
+# a moderate clip_start (not 1e-7) keeps the Solid/EEVEE viewport preview precise.
+_clip_targets = 0
+for _area in (a for _s in bpy.data.screens for a in _s.areas if a.type == 'VIEW_3D'):
+    for _space in (sp for sp in _area.spaces if sp.type == 'VIEW_3D'):
+        _space.clip_start = VIEWPORT_CLIP_START
+        _space.clip_end   = VIEWPORT_CLIP_END
+        _clip_targets += 1
+for _cam in (c for c in bpy.data.cameras):
+    _cam.clip_start = VIEWPORT_CLIP_START
+    _cam.clip_end   = VIEWPORT_CLIP_END
+    _clip_targets += 1
+print(
+    f'Clip range set to [{VIEWPORT_CLIP_START}, {VIEWPORT_CLIP_END}] BU '
+    f'on {_clip_targets} viewport/camera target(s).'
+)
+
+# ── EEVEE volumetric range (viewport preview only; Cycles ignores these) ──────
+_ee = getattr(bpy.context.scene, 'eevee', None)
+if _ee is not None:
+    _applied = []
+    for _attr, _val in (
+        ('volumetric_start',     VOLUMETRIC_START),
+        ('volumetric_end',       VOLUMETRIC_END),
+        ('volumetric_samples',   VOLUMETRIC_SAMPLES),
+        ('volumetric_tile_size', VOLUMETRIC_TILE_PX),
+    ):
+        if hasattr(_ee, _attr):
+            try:
+                setattr(_ee, _attr, _val)
+                _applied.append(_attr)
+            except (TypeError, ValueError) as _e:
+                print(f'  NOTE: could not set scene.eevee.{_attr}: {_e}')
+    print(
+        f'EEVEE volumetric settings applied ({len(_applied)}): '
+        f'{", ".join(_applied) if _applied else "none — attrs not present in this version"}. '
+        '(Affects EEVEE preview only; Cycles ignores them.)'
+    )
+
 print(
     f'Done — {n_grains} DEM grains animated over {len(csv_files)} frame(s).\n'
     'Positions are in Apophis body frame (Apophis at world origin).\n'
-    f'Earth Empty "Earth" is at (earth_km - apophis_km) × EARTH_VIS_SCALE={EARTH_VIS_SCALE} BU/km.\n'
+    f'Earth Empty "Earth" is at (earth_km - apophis_km) × {EARTH_VIS_SCALE} BU/km '
+    f'(~7600 BU at closest approach; scale_factor ≈ 1.0 → native size, atmosphere preserved).\n'
     'Sun lamp "DEM_SunLight" direction is keyframed from physical PHANTOM positions.\n'
+    f'Clip range [{VIEWPORT_CLIP_START}, {VIEWPORT_CLIP_END}] BU applied automatically '
+    '— do NOT run Viewport.py (it is tuned for the point-mass scene and Z-fights here).\n'
     'Tune EARTH_VIS_SCALE, SUN_LAMP_ENERGY / SUN_LAMP_ANGLE at the top as needed.'
 )

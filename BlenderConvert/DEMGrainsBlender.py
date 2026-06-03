@@ -6,12 +6,13 @@ import os
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 # Path to the dem_grains_output/ folder produced by DEMtoCSV.py.
-GRAINS_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/run_0001_grains_output/'
+# OBJ-cropped opposite_near_h breakup, 5 min dumps (~1297 frames): fine_dt batch.
+GRAINS_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/torque_align_obj_fine_dt/run_0001_grains_output/'
 
 # Path to the bodies output folder — filenames match GRAINS_CSV_DIR.
 # Used to read the Sun and Apophis absolute positions and animate the Sun lamp.
 # Set to '' or a nonexistent path to skip the Sun lamp entirely.
-BODIES_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/run_0001_bodies_output/'
+BODIES_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/torque_align_obj_fine_dt/run_0001_bodies_output/'
 
 # Sun lamp settings.
 # SUN_LAMP_ENERGY: irradiance in Watts — scale to taste for your render setup.
@@ -27,6 +28,10 @@ HANDLE_MODE          = 'AUTO_CLAMPED'
 
 # Material colour for the rubble-pile grains (RGBA, 0-1).
 GRAIN_COLOR = (0.35, 0.30, 0.25, 1.0)
+
+# Name of the Blender collection that will hold all grain sphere objects.
+# Created automatically if it does not already exist.
+GRAIN_COLLECTION_NAME = 'DEM_Grains'
 # ─────────────────────────────────────────────────────────────────────────────
 # COORDINATE NOTE
 # ───────────────
@@ -122,6 +127,12 @@ if _bodies_available:
     print('Sun lamp "DEM_SunLight" created.')
 
 
+# ── Create grain collection ───────────────────────────────────────────────────
+grain_col = bpy.data.collections.get(GRAIN_COLLECTION_NAME)
+if grain_col is None:
+    grain_col = bpy.data.collections.new(GRAIN_COLLECTION_NAME)
+    bpy.context.scene.collection.children.link(grain_col)
+
 # ── First pass: read frame 1 and create one sphere per grain ──────────────────
 first_df = pd.read_csv(csv_files[0])
 n_grains = len(first_df)
@@ -138,6 +149,10 @@ for _, row in first_df.iterrows():
     )
     obj      = bpy.context.object
     obj.name = name
+
+    for c in list(obj.users_collection):
+        c.objects.unlink(obj)
+    grain_col.objects.link(obj)
 
     if obj.data.materials:
         obj.data.materials[0] = mat
