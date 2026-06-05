@@ -87,6 +87,21 @@ EARTH_ROTATION_OFFSET_DEG = 0.0
 # (spherically symmetric — rotating it has no visible effect in Cycles).
 EARTH_ROTATE_CLOUDS       = True
 
+# ── Moon ──────────────────────────────────────────────────────────────────────
+# Moon uses EARTH_VIS_SCALE for both position and radius — preserves the real
+# Moon–Earth orbital distance (~384 400 km → ~76 880 BU from Earth at 0.2 BU/km).
+MOON_PHYSICAL_RADIUS_KM = 1737.53            # → 347.5 BU at EARTH_VIS_SCALE=0.2
+MOON_COLOR              = (0.55, 0.55, 0.55, 1.0)   # grey lunar surface
+
+# ── Sun visual body ────────────────────────────────────────────────────────────
+# DEM_SunLight lamp is UNCHANGED — this adds a visible sphere only.
+# At EARTH_VIS_SCALE the Sun would sit ~30 M BU away as a 139 000 BU ball;
+# two independent variables keep it at a practical scene size.
+SUN_VIS_SCALE         = 0.00002   # BU/km for Sun POSITION  (~3 000 BU from origin)
+SUN_BODY_RADIUS_BU    = 150.0     # visual radius of Sun sphere in BU
+SUN_COLOR             = (1.0, 0.85, 0.2, 1.0)   # warm yellow-white
+SUN_EMISSION_STRENGTH = 5.0       # Principled BSDF emission strength
+
 # Camera/viewport near & far clip planes (BU), applied automatically at the end.
 # In Cycles clip_end can be large freely (no depth buffer).  clip_start stays
 # moderate (not 1e-7) so the Solid/EEVEE viewport preview you navigate in stays
@@ -510,6 +525,69 @@ if earth_empty is not None:
     print(f'Earth rotation objects ({len(_earth_spin_objs)}): {[o.name for o in _earth_spin_objs]}')
 
 
+# ── Create Moon (UV sphere, same scale as Earth) ──────────────────────────────
+moon_empty = None
+if _bodies_available:
+    bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
+    moon_empty      = bpy.context.object
+    moon_empty.name = 'Moon'
+    moon_radius_bu  = MOON_PHYSICAL_RADIUS_KM * EARTH_VIS_SCALE
+    bpy.ops.mesh.primitive_uv_sphere_add(
+        radius=moon_radius_bu, segments=32, ring_count=16, location=(0.0, 0.0, 0.0)
+    )
+    moon_sphere      = bpy.context.object
+    moon_sphere.name = 'Moon_Body'
+    moon_mat = bpy.data.materials.get('Moon_Surface')
+    if moon_mat is None:
+        moon_mat = bpy.data.materials.new('Moon_Surface')
+        moon_mat.use_nodes = True
+        _bsdf = moon_mat.node_tree.nodes.get('Principled BSDF')
+        if _bsdf:
+            _bsdf.inputs['Base Color'].default_value = MOON_COLOR
+            _bsdf.inputs['Roughness'].default_value  = 0.95
+    if moon_sphere.data.materials:
+        moon_sphere.data.materials[0] = moon_mat
+    else:
+        moon_sphere.data.materials.append(moon_mat)
+    _parent_part_to_empty(moon_sphere, moon_empty)
+    print(f'Moon UV sphere created — radius {moon_radius_bu:.1f} BU')
+
+# ── Create Sun visual body (UV sphere, separate position/size scales) ──────────
+sun_body_empty = None
+if _bodies_available:
+    bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
+    sun_body_empty      = bpy.context.object
+    sun_body_empty.name = 'Sun_Visual'
+    bpy.ops.mesh.primitive_uv_sphere_add(
+        radius=SUN_BODY_RADIUS_BU, segments=32, ring_count=16, location=(0.0, 0.0, 0.0)
+    )
+    sun_sphere      = bpy.context.object
+    sun_sphere.name = 'Sun_Body'
+    sun_mat = bpy.data.materials.get('Sun_Surface')
+    if sun_mat is None:
+        sun_mat = bpy.data.materials.new('Sun_Surface')
+        sun_mat.use_nodes = True
+        _bsdf = sun_mat.node_tree.nodes.get('Principled BSDF')
+        if _bsdf:
+            _bsdf.inputs['Base Color'].default_value = SUN_COLOR
+            # Emission: Blender 4.x uses 'Emission Color' + 'Emission Strength';
+            # 3.x used a single 'Emission' colour input on the node.
+            for _inp_name, _inp_val in (
+                ('Emission Color',    SUN_COLOR),
+                ('Emission',          SUN_COLOR),
+                ('Emission Strength', SUN_EMISSION_STRENGTH),
+            ):
+                if _inp_name in _bsdf.inputs:
+                    _bsdf.inputs[_inp_name].default_value = _inp_val
+    if sun_sphere.data.materials:
+        sun_sphere.data.materials[0] = sun_mat
+    else:
+        sun_sphere.data.materials.append(sun_mat)
+    _parent_part_to_empty(sun_sphere, sun_body_empty)
+    print(f'Sun visual body created — radius {SUN_BODY_RADIUS_BU} BU, '
+          f'position scale {SUN_VIS_SCALE} BU/km (~'
+          f'{int(1.496e8 * SUN_VIS_SCALE)} BU from origin at 1 AU)')
+
 # ── Create grain collection ───────────────────────────────────────────────────
 grain_col = bpy.data.collections.get(GRAIN_COLLECTION_NAME)
 if grain_col is None:
@@ -609,6 +687,29 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
                     _obj.rotation_quaternion = q
                     _obj.keyframe_insert(data_path='rotation_quaternion', frame=frame_num)
 
+            # Moon position: (moon_km - apophis_km) × EARTH_VIS_SCALE
+            moon_row = bdf.loc[bdf['name'] == 'Moon']
+            if moon_empty is not None and not moon_row.empty and not apo_row.empty:
+                moon_km = moon_row[['x_km', 'y_km', 'z_km']].values[0]
+                rel_km  = moon_km - apo_km
+                moon_empty.location = (
+                    float(rel_km[0] * EARTH_VIS_SCALE),
+                    float(rel_km[1] * EARTH_VIS_SCALE),
+                    float(rel_km[2] * EARTH_VIS_SCALE),
+                )
+                moon_empty.keyframe_insert(data_path='location', frame=frame_num)
+
+            # Sun visual body position: (sun_km - apophis_km) × SUN_VIS_SCALE
+            if sun_body_empty is not None and not sun_row.empty and not apo_row.empty:
+                sun_km_vis = sun_row[['x_km', 'y_km', 'z_km']].values[0]
+                rel_km     = sun_km_vis - apo_km
+                sun_body_empty.location = (
+                    float(rel_km[0] * SUN_VIS_SCALE),
+                    float(rel_km[1] * SUN_VIS_SCALE),
+                    float(rel_km[2] * SUN_VIS_SCALE),
+                )
+                sun_body_empty.keyframe_insert(data_path='location', frame=frame_num)
+
 # ── Third pass: smooth F-curves ───────────────────────────────────────────────
 if SMOOTH_INTERPOLATION:
     print('Smoothing F-curves ...')
@@ -622,6 +723,10 @@ if SMOOTH_INTERPOLATION:
         _smooth_fcurves(earth_empty, 'location')
     for _obj in _earth_spin_objs:
         _smooth_fcurves(_obj, 'rotation_quaternion')
+    if moon_empty is not None:
+        _smooth_fcurves(moon_empty, 'location')
+    if sun_body_empty is not None:
+        _smooth_fcurves(sun_body_empty, 'location')
 
 # ── Set clip range on all viewports and cameras ───────────────────────────────
 # Earth sits ~7600 BU away at closest approach (radius 1274 BU) and recedes to
@@ -669,7 +774,10 @@ print(
     'Positions are in Apophis body frame (Apophis at world origin).\n'
     f'Earth Empty "Earth" is at (earth_km - apophis_km) × {EARTH_VIS_SCALE} BU/km '
     f'(~7600 BU at closest approach; scale_factor ≈ 1.0 → native size, atmosphere preserved).\n'
-    'Sun lamp "DEM_SunLight" direction is keyframed from physical PHANTOM positions.\n'
+    'Moon Empty "Moon" is at (moon_km - apophis_km) × EARTH_VIS_SCALE BU/km.\n'
+    'Sun_Visual Empty is at (sun_km - apophis_km) × SUN_VIS_SCALE BU/km; '
+    f'Sun_Body sphere radius = {SUN_BODY_RADIUS_BU} BU.\n'
+    'Sun lamp "DEM_SunLight" direction is keyframed from physical PHANTOM positions (unchanged).\n'
     f'Clip range [{VIEWPORT_CLIP_START}, {VIEWPORT_CLIP_END}] BU applied automatically '
     '— do NOT run Viewport.py (it is tuned for the point-mass scene and Z-fights here).\n'
     'Tune EARTH_VIS_SCALE, SUN_LAMP_ENERGY / SUN_LAMP_ANGLE at the top as needed.'
