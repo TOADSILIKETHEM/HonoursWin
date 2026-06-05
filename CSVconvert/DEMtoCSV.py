@@ -5,12 +5,12 @@ import pandas as pd
 import numpy as np
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-INPUT_DIR    = "//wsl.localhost/Ubuntu/home/mboyle/Honours/sobol/sobol_mass_runs/sobol_20260526_115314_n8_s42_sspd20-35_sobl0-360_saz0-360/run_0002"
+INPUT_DIR    = "//wsl.localhost/Ubuntu/home/mboyle/Honours/sobol_mass_runs/sobol_20260601_204015_torque_align_obj_breakup_fine_dt/run_0001"
 DUMP_PATTERN = "sobol_[0-9]*"
 
 # Root folder for all DEM CSV output.  Subfolders are created automatically
 # based on the INPUT_DIR name, so changing INPUT_DIR above is all you need to do.
-BASE_OUTPUT_DIR = r"c:\Users\22boy\OneDrive\Documents\GC-Max_desktop\Honours\Code\DEMCSVs"
+BASE_OUTPUT_DIR = r"c:\Users\22boy\OneDrive\Documents\GC-Max_desktop\Honours\Code\DEMCSVs\torque_align_obj_fine_dt"
 
 _sim_name         = os.path.basename(INPUT_DIR.rstrip('/'))
 BODIES_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, f"{_sim_name}_bodies_output")
@@ -59,7 +59,7 @@ GRAIN_VIS_SCALE = 50.0
 #               the DEM grain block is incomplete and unusable.
 # Dumps with fewer than MIN_DEM_GRAINS DEM particles are treated as mini
 # dumps and skipped.  Set to just below np_apophis (64).
-MIN_DEM_GRAINS = 60
+MIN_DEM_GRAINS = 450   # this run uses np_apophis=500; set ~450 to skip mini-dumps
 # ─────────────────────────────────────────────────────────────────────────────
 
 AU_IN_CM = 1.495978707e13
@@ -86,7 +86,15 @@ for dump in dump_files:
             continue
 
         # Unit conversions
-        udist    = float(sdf_sinks.params.get("udist", 1.0))  # code unit in cm
+        udist     = float(sdf_sinks.params.get("udist", 1.0))  # code unit in cm
+        utime_raw = sdf_sinks.params.get("utime")
+        if utime_raw is None:
+            print(f'  WARNING [{os.path.basename(dump)}]: "utime" not in params; time_s equals raw code-unit time.')
+            utime_s = 1.0
+        else:
+            utime_s = float(utime_raw)
+        time_code = float(sdf_sinks.params.get("time", 0.0))
+        time_s    = time_code * utime_s
         to_km    = udist / KM_IN_CM   # code unit → km
         to_au    = udist / AU_IN_CM   # code unit → AU
 
@@ -118,6 +126,7 @@ for dump in dump_files:
 
         bodies_df = pd.DataFrame({
             "name":   BODY_NAMES[: len(b)],
+            "time_s": time_s,
             "x_au":   b["x"].values * to_au,
             "y_au":   b["y"].values * to_au,
             "z_au":   b["z"].values * to_au,
@@ -143,6 +152,7 @@ for dump in dump_files:
         # Blender scripts (which expect row 10 = Apophis) continue to work.
         apophis_row = {
             "name":  "Apophis",
+            "time_s": time_s,
             "x_au":  com_x * to_au,
             "y_au":  com_y * to_au,
             "z_au":  com_z * to_au,
@@ -166,6 +176,7 @@ for dump in dump_files:
         # Per-grain DataFrame with both absolute (AU) and CoM-relative (km) positions
         grains_df = pd.DataFrame({
             "grain_id":   range(n_dem),
+            "time_s":     time_s,
             # Absolute AU positions — only useful for locating Apophis in the
             # solar system; DO NOT use to position individual grains in Blender
             # (all 64 values are identical to 6 d.p. and float32 collapses them).

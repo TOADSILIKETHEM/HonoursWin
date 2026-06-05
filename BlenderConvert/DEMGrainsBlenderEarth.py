@@ -1,4 +1,5 @@
 import bpy
+import math
 import mathutils
 import pandas as pd
 import glob
@@ -73,6 +74,18 @@ EARTH_SHELL_SCALE = {
 #         (depth-buffer Z-fighting); irrelevant to Cycles but unnavigable.  Avoid.
 EARTH_VIS_SCALE = 0.2   # BU per km → scale_factor ≈ 1.0 for this model:
                         # native authored size, so the volume atmosphere is preserved.
+
+# Earth rotation
+EARTH_SIDEREAL_DAY_S      = 86164.0905   # seconds per 360° sidereal rotation
+# Spin axis in PHANTOM's ecliptic J2000 frame (X = vernal equinox, Z = ecliptic north).
+# Earth obliquity ε = 23.44°  →  pole = (0, −sin ε, cos ε) = (0, −0.3979, 0.9174).
+EARTH_SPIN_AXIS           = (0.0, -0.3979, 0.9174)
+# Initial phase offset in degrees.  Adjust after rendering so the correct geography
+# faces the camera at t = 0 (simulation epoch → UTC conversion is out of scope here).
+EARTH_ROTATION_OFFSET_DEG = 0.0
+# Rotate the Clouds shell at the same rate as Surface.  Atmosphere is always skipped
+# (spherically symmetric — rotating it has no visible effect in Cycles).
+EARTH_ROTATE_CLOUDS       = True
 
 # Camera/viewport near & far clip planes (BU), applied automatically at the end.
 # In Cycles clip_end can be large freely (no depth buffer).  clip_start stays
@@ -482,6 +495,20 @@ if _bodies_available and EARTH_MODEL_PATH and os.path.exists(EARTH_MODEL_PATH):
 elif EARTH_MODEL_PATH and not os.path.exists(EARTH_MODEL_PATH):
     print(f'WARNING: EARTH_MODEL_PATH not found ({EARTH_MODEL_PATH}) — Earth skipped.')
 
+# Collect Surface and (optionally) Clouds for per-frame rotation keyframing.
+# Atmosphere is omitted — spherically symmetric, so spinning it is invisible.
+_earth_spin_objs = []
+if earth_empty is not None:
+    for _obj in earth_empty.children_recursive:
+        _base = _object_base_name(_obj.name)
+        if _base == 'Surface':
+            _obj.rotation_mode = 'QUATERNION'
+            _earth_spin_objs.append(_obj)
+        elif _base == 'Clouds' and EARTH_ROTATE_CLOUDS:
+            _obj.rotation_mode = 'QUATERNION'
+            _earth_spin_objs.append(_obj)
+    print(f'Earth rotation objects ({len(_earth_spin_objs)}): {[o.name for o in _earth_spin_objs]}')
+
 
 # ── Create grain collection ───────────────────────────────────────────────────
 grain_col = bpy.data.collections.get(GRAIN_COLLECTION_NAME)
@@ -572,6 +599,16 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
                 )
                 earth_empty.keyframe_insert(data_path='location', frame=frame_num)
 
+            # Earth rotation: spin Surface + Clouds about the tilted pole.
+            if _earth_spin_objs:
+                time_s_val = float(bdf['time_s'].iloc[0]) if 'time_s' in bdf.columns else 0.0
+                spin_deg   = (time_s_val / EARTH_SIDEREAL_DAY_S) * 360.0 + EARTH_ROTATION_OFFSET_DEG
+                spin_axis  = mathutils.Vector(EARTH_SPIN_AXIS).normalized()
+                q = mathutils.Quaternion(spin_axis, math.radians(spin_deg))
+                for _obj in _earth_spin_objs:
+                    _obj.rotation_quaternion = q
+                    _obj.keyframe_insert(data_path='rotation_quaternion', frame=frame_num)
+
 # ── Third pass: smooth F-curves ───────────────────────────────────────────────
 if SMOOTH_INTERPOLATION:
     print('Smoothing F-curves ...')
@@ -583,6 +620,8 @@ if SMOOTH_INTERPOLATION:
         _smooth_fcurves(sun_lamp_obj, 'rotation_euler')
     if earth_empty is not None:
         _smooth_fcurves(earth_empty, 'location')
+    for _obj in _earth_spin_objs:
+        _smooth_fcurves(_obj, 'rotation_quaternion')
 
 # ── Set clip range on all viewports and cameras ───────────────────────────────
 # Earth sits ~7600 BU away at closest approach (radius 1274 BU) and recedes to
