@@ -1,4 +1,12 @@
+"""
+DEM rubble-pile import + Earth-tracking camera — single Blender script.
+
+Equivalent to running DEMGrainsBlenderEarth.py, then DEMCamera.py.
+Set SETUP_CAMERA = False to run the import only (same as Earth script alone).
+"""
+
 import bpy
+import csv
 import math
 import mathutils
 import pandas as pd
@@ -10,13 +18,16 @@ from mathutils import Matrix, Vector
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 # Path to the dem_grains_output/ folder produced by DEMtoCSV.py.
-GRAINS_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/torque_align_obj_fine_dt/run_0001_grains_output/'
+GRAINS_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/1000np Alinged/run_0001_grains_output/'
 
 # Path to the bodies output folder — filenames match GRAINS_CSV_DIR.
 # Used to read the Sun, Earth, and Apophis positions each frame.
 # Set to '' or a nonexistent path to skip Sun lamp and Earth entirely.
-BODIES_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/torque_align_obj_fine_dt/run_0001_bodies_output/'
-# OBJ-cropped opposite_near_h breakup, 5 min dumps (~1297 frames): fine_dt batch.
+BODIES_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/1000np Alinged/run_0001_bodies_output/'
+# 1000np aligned run, 5 min dumps (~1297 frames).
+
+# Run DEMCamera.py logic after import (requires Earth Empty + bodies CSVs).
+SETUP_CAMERA = True
 
 # Sun lamp settings.
 SUN_LAMP_ENERGY = 10.0
@@ -31,7 +42,6 @@ HANDLE_MODE          = 'AUTO_CLAMPED'
 GRAIN_COLOR = (0.35, 0.30, 0.25, 1.0)
 
 # Name of the Blender collection that will hold all grain sphere objects.
-# Created automatically if it does not already exist.
 GRAIN_COLLECTION_NAME = 'DEM_Grains'
 
 # Earth 3-D model (Surface, Atmosphere, Clouds from TheEarth.blend).
@@ -39,101 +49,60 @@ EARTH_MODEL_PATH         = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Hon
 EARTH_PART_NAMES         = ['Surface', 'Atmosphere', 'Clouds']
 EARTH_PHYSICAL_RADIUS_KM = 6371.0
 
-
 EARTH_SHELL_SCALE = {
     'Atmosphere': 1.004,
     'Clouds':     1.002,
 }
 
-# Scale for Earth's position AND radius relative to the Apophis body frame
-# (BU per km).  Earth's angular size through the camera is SCALE-INDEPENDENT (the
-# mesh radius and the Earth distance both multiply by EARTH_VIS_SCALE, so the
-# ratio cancels).  What the value actually controls is (a) how the volume-scatter
-# atmosphere renders and (b) how far Earth sits from the origin.
-#
-# RENDER TARGET = CYCLES.  Cycles ray-traces: there is NO depth buffer, so no
-# Z-fighting, and no EEVEE froxel range to respect.  The dominant concern is the
-# Atmosphere, which is a VOLUME — its appearance is scale-DEPENDENT because
-# optical depth = density × path length, and shrinking the model shrinks the path
-# (and can drop the shell below Cycles' volume step size → blocky, weak haze).
-# To reproduce the atmosphere EXACTLY as authored in TheEarth1.blend, import the
-# Earth at its native size, i.e. scale_factor = 1.0:
-#
-#   measured authored radius ≈ 1274 BU  (printed in the "Earth layout:" line)
-#   EARTH_VIS_SCALE = 1274 / 6371 ≈ 0.2  →  target_radius = 6371 × 0.2 ≈ 1274 BU
-#   →  scale_factor ≈ 1.0  →  native size, atmosphere untouched.
-#
-# At 0.2 the Earth ends up ~7600 BU away at closest approach (radius 1274 BU),
-# filling ~19° of sky — physically correct framing, and depth-safe for the
-# Solid/EEVEE viewport preview too.
-#
-# WHY NOT OTHER VALUES:
-#   0.005 (previous) shrank the model 40× → atmosphere 40× too thin AND its shell
-#         thinner than Cycles' volume step → blocky/weak haze.
-#   50    put Earth at ~1.9 M BU → broke the rasterized viewport preview
-#         (depth-buffer Z-fighting); irrelevant to Cycles but unnavigable.  Avoid.
-EARTH_VIS_SCALE = 0.2   # BU per km → scale_factor ≈ 1.0 for this model:
-                        # native authored size, so the volume atmosphere is preserved.
+EARTH_VIS_SCALE = 0.2   # BU per km → scale_factor ≈ 1.0 for TheEarth1.blend
 
-# Earth rotation
-EARTH_SIDEREAL_DAY_S      = 86164.0905   # seconds per 360° sidereal rotation
-# Spin axis in PHANTOM's ecliptic J2000 frame (X = vernal equinox, Z = ecliptic north).
-# Earth obliquity ε = 23.44°  →  pole = (0, −sin ε, cos ε) = (0, −0.3979, 0.9174).
+EARTH_SIDEREAL_DAY_S      = 86164.0905
 EARTH_SPIN_AXIS           = (0.0, -0.3979, 0.9174)
-# Initial phase offset in degrees.  Adjust after rendering so the correct geography
-# faces the camera at t = 0 (simulation epoch → UTC conversion is out of scope here).
 EARTH_ROTATION_OFFSET_DEG = 0.0
-# Rotate the Clouds shell at the same rate as Surface.  Atmosphere is always skipped
-# (spherically symmetric — rotating it has no visible effect in Cycles).
 EARTH_ROTATE_CLOUDS       = True
 
-# ── Moon ──────────────────────────────────────────────────────────────────────
-# Moon uses EARTH_VIS_SCALE for both position and radius — preserves the real
-# Moon–Earth orbital distance (~384 400 km → ~76 880 BU from Earth at 0.2 BU/km).
-MOON_PHYSICAL_RADIUS_KM = 1737.53            # → 347.5 BU at EARTH_VIS_SCALE=0.2
-MOON_COLOR              = (0.55, 0.55, 0.55, 1.0)   # grey lunar surface
+MOON_PHYSICAL_RADIUS_KM = 1737.53
+MOON_COLOR              = (0.55, 0.55, 0.55, 1.0)
 
-# ── Sun visual body ────────────────────────────────────────────────────────────
-# DEM_SunLight lamp is UNCHANGED — this adds a visible sphere only.
-# At EARTH_VIS_SCALE the Sun would sit ~30 M BU away as a 139 000 BU ball;
-# two independent variables keep it at a practical scene size.
-SUN_VIS_SCALE         = 0.003     # BU/km for Sun POSITION  (~448 800 BU from origin, beyond Earth start)
-SUN_BODY_RADIUS_BU    = 10000.0   # visual radius of Sun sphere in BU (~1.3° apparent at 448 800 BU)
-SUN_COLOR             = (1.0, 1.0, 1.0, 1.0)    # white emission (solar disc)
-SUN_EMISSION_STRENGTH = 6000.0    # Principled BSDF emission strength
+SUN_VIS_SCALE         = 0.003
+SUN_BODY_RADIUS_BU    = 10000.0
+SUN_COLOR             = (1.0, 1.0, 1.0, 1.0)
+SUN_EMISSION_STRENGTH = 6000.0
 
-# Camera/viewport near & far clip planes (BU), applied automatically at the end.
-# In Cycles clip_end can be large freely (no depth buffer).  clip_start stays
-# moderate (not 1e-7) so the Solid/EEVEE viewport preview you navigate in stays
-# depth-precise.  At EARTH_VIS_SCALE = 0.2 Earth is ~7600 BU away at closest
-# approach and recedes to ~1e7 BU at the flyby edges; clip_end below covers the
-# close-approach window — raise toward ~12 000 000 to keep Earth visible across the
-# entire flyby.  Do NOT run Viewport.py here (it is tuned for the point-mass scene,
-# clip_start 1e-7).
 VIEWPORT_CLIP_START = 0.1
 VIEWPORT_CLIP_END   = 2000000.0
 
-# EEVEE volumetric range/quality for the Earth's volume-scatter atmosphere.
-# NOTE: this affects ONLY the EEVEE viewport/preview — Cycles (the render target)
-# ray-marches volumes directly and ignores all of these.  Kept for versatility so
-# the atmosphere also looks reasonable if you switch to EEVEE.  EEVEE only
-# ray-marches volumes between volumetric_start and volumetric_end (distances FROM
-# THE CAMERA); the default end (100 BU) is far short of Earth (~7600 BU at 0.2), so
-# without this the EEVEE atmosphere renders as blocky froxel garbage.
 VOLUMETRIC_START   = 0.1
-VOLUMETRIC_END     = 50000.0  # must exceed camera→Earth distance (EEVEE only)
-VOLUMETRIC_SAMPLES = 128      # depth slices; higher = smoother, less banding
-VOLUMETRIC_TILE_PX = '2'      # screen-space froxel tile size (finer = less blocky)
+VOLUMETRIC_END     = 50000.0
+VOLUMETRIC_SAMPLES = 128
+VOLUMETRIC_TILE_PX = '2'
+
+# ── Camera (DEMCamera.py) ─────────────────────────────────────────────────────
+CAMERA_NAME         = 'DEM_TrackCam'
+CAMERA_FOV_DEG      = 70.0
+CAM_DIST_BU         = 150.0
+CAM_ANGLE_DEG       = 30.0
+EARTH_EMPTY_NAME    = 'Earth'
+CORE_GRAIN_FRACTION = 0.80
+SMOOTH_CAMERA       = True
+LOCATION_INTERP     = 'BEZIER'
+LOCATION_HANDLE     = 'AUTO_CLAMPED'
+ROTATION_INTERP     = 'LINEAR'
+CAM_CLIP_START      = 0.01
+CAM_CLIP_END        = 20_000_000.0
+
+# Fill light — parented to the camera so it co-moves each frame automatically.
+# Illuminates the camera-facing side of Apophis without extra keyframes.
+SETUP_CAM_FILL_LIGHT  = True
+CAM_FILL_LIGHT_NAME   = 'DEM_CamFill'
+CAM_FILL_LIGHT_TYPE   = 'POINT'   # POINT, SPOT, AREA, or SUN
+CAM_FILL_LIGHT_ENERGY = 20000.0
 # ─────────────────────────────────────────────────────────────────────────────
 # COORDINATE NOTE
-# ───────────────
-# Grains: x_vis = x_rel_km × GRAIN_VIS_SCALE (set in DEMtoCSV.py, default 50).
-#   Apophis CoM sits at the world origin; grains are within ±25 BU.
+# Grains: x_vis = x_rel_km × GRAIN_VIS_SCALE (DEMtoCSV.py, default 50).
 # Earth:  (earth_km - apophis_km) × EARTH_VIS_SCALE.
-#   EARTH_VIS_SCALE = 0.2 imports Earth at its native authored size (scale_factor
-#   ≈ 1.0), so the volume-scatter atmosphere renders exactly as in TheEarth1.blend.
-#   Earth sits ~7600 BU away at closest approach.  See the EARTH_VIS_SCALE note above.
-# Sun lamp: rotation only (from normalised Sun–Apophis km vector).
+# Sun lamp: −Z aligned with light from Sun (−normalised sun_km − apo_km).
+# Camera: tracks dense grain core; uses Earth Empty keyframes for framing.
 # ─────────────────────────────────────────────────────────────────────────────
 
 csv_files = sorted(glob.glob(os.path.join(GRAINS_CSV_DIR, '*.csv')))
@@ -162,18 +131,6 @@ def _bodies_csv_for(grains_path):
     return p if os.path.exists(p) else None
 
 
-# ── Shared grain material ─────────────────────────────────────────────────────
-mat = bpy.data.materials.get('DEM_Grain')
-if mat is None:
-    mat = bpy.data.materials.new('DEM_Grain')
-    mat.use_nodes = True
-    bsdf = mat.node_tree.nodes.get('Principled BSDF')
-    if bsdf:
-        bsdf.inputs['Base Color'].default_value = GRAIN_COLOR
-        bsdf.inputs['Roughness'].default_value  = 0.85
-        bsdf.inputs['Metallic'].default_value   = 0.0
-
-
 def _smooth_fcurves(obj, data_path):
     """Apply INTERPOLATION_MODE to all F-curves on obj matching data_path."""
     if not obj.animation_data or not obj.animation_data.action:
@@ -198,14 +155,159 @@ def _smooth_fcurves(obj, data_path):
                 kp.handle_right_type = HANDLE_MODE
 
 
-# ── Earth model import machinery (adapted from OnlyEarth_ApophisTrueSize.py) ──
+def _apply_fcurve_interp(obj, data_path, interp, handle=None):
+    """Set interpolation on matching F-curves (camera uses per-path modes)."""
+    if not obj.animation_data or not obj.animation_data.action:
+        return
+    action  = obj.animation_data.action
+    fcurves = []
+    legacy  = getattr(action, 'fcurves', None)
+    if legacy is not None:
+        fcurves.extend(list(legacy))
+    else:
+        for layer in getattr(action, 'layers', []):
+            for strip in getattr(layer, 'strips', []):
+                for bag in getattr(strip, 'channelbags', []):
+                    fcurves.extend(list(getattr(bag, 'fcurves', [])))
+    for fc in fcurves:
+        if fc.data_path != data_path:
+            continue
+        for kp in fc.keyframe_points:
+            kp.interpolation = interp
+            if interp == 'BEZIER' and handle:
+                kp.handle_left_type  = handle
+                kp.handle_right_type = handle
+
+
+def _grain_core(csv_path, fraction):
+    """Centroid of the closest `fraction` of grains to the CoM (origin)."""
+    pts = []
+    with open(csv_path, newline='') as f:
+        for row in csv.DictReader(f):
+            x, y, z = float(row['x_vis']), float(row['y_vis']), float(row['z_vis'])
+            d = math.sqrt(x * x + y * y + z * z)
+            pts.append((d, x, y, z))
+    pts.sort()
+    n = max(1, int(len(pts) * fraction))
+    sub = pts[:n]
+    cx = sum(r[1] for r in sub) / n
+    cy = sum(r[2] for r in sub) / n
+    cz = sum(r[3] for r in sub) / n
+    return Vector((cx, cy, cz))
+
+
+def setup_dem_track_camera(earth_empty, grain_files):
+    """
+    Create and keyframe DEM_TrackCam — same behaviour as DEMCamera.py.
+    Call after import; earth_empty must be the animated Earth Empty.
+    """
+    if earth_empty is None:
+        raise RuntimeError(
+            f'Object "{EARTH_EMPTY_NAME}" not found. '
+            'Earth import was skipped — camera needs the Earth Empty keyframes.'
+        )
+
+    scene   = bpy.context.scene
+    f_start = scene.frame_start
+    f_end   = scene.frame_end
+    n_frames = f_end - f_start + 1
+    n_csvs   = len(grain_files)
+    if n_frames != n_csvs:
+        print(
+            f'WARNING: scene has {n_frames} frames but {n_csvs} grain CSVs. '
+            'Using min of the two.'
+        )
+
+    cam_data = bpy.data.cameras.get(CAMERA_NAME)
+    if cam_data is None:
+        cam_data = bpy.data.cameras.new(CAMERA_NAME)
+    cam_data.lens_unit  = 'FOV'
+    cam_data.angle      = math.radians(CAMERA_FOV_DEG)
+    cam_data.clip_start = CAM_CLIP_START
+    cam_data.clip_end   = CAM_CLIP_END
+
+    cam_obj = bpy.data.objects.get(CAMERA_NAME)
+    if cam_obj is None:
+        cam_obj = bpy.data.objects.new(CAMERA_NAME, cam_data)
+        scene.collection.objects.link(cam_obj)
+    else:
+        cam_obj.data = cam_data
+
+    cam_obj.rotation_mode = 'QUATERNION'
+    scene.camera = cam_obj
+
+    print(f'Camera "{CAMERA_NAME}" ready — keyframing {min(n_frames, n_csvs)} frames ...')
+
+    angle_rad = math.radians(CAM_ANGLE_DEG)
+    cos_a     = math.cos(angle_rad)
+    sin_a     = math.sin(angle_rad)
+    _Z        = Vector((0.0, 0.0, 1.0))
+    _X        = Vector((1.0, 0.0, 0.0))
+
+    prev_q  = None
+    n_total = min(n_frames, n_csvs)
+
+    for i in range(n_total):
+        frame    = f_start + i
+        csv_path = grain_files[i]
+        scene.frame_set(frame)
+
+        core_pos = _grain_core(csv_path, CORE_GRAIN_FRACTION)
+        earth_pos = earth_empty.matrix_world.translation.copy()
+
+        earth_vec = earth_pos - core_pos
+        earth_dist_core = earth_vec.length
+        if earth_dist_core > 1e-6:
+            earth_from_core = earth_vec / earth_dist_core
+        else:
+            earth_from_core = _X.copy()
+
+        offset_dir = earth_from_core.cross(_Z)
+        if offset_dir.length < 1e-4:
+            offset_dir = earth_from_core.cross(_X)
+        if offset_dir.length < 1e-4:
+            offset_dir = Vector((0.0, 1.0, 0.0))
+        offset_dir.normalize()
+
+        cam_pos = core_pos + (-earth_from_core * cos_a + offset_dir * sin_a) * CAM_DIST_BU
+        look_vec = (core_pos - cam_pos).normalized()
+        q = look_vec.to_track_quat('-Z', 'Y')
+
+        if prev_q is not None and q.dot(prev_q) < 0.0:
+            q.negate()
+        prev_q = q.copy()
+
+        cam_obj.location            = cam_pos
+        cam_obj.rotation_quaternion = q
+        cam_obj.keyframe_insert(data_path='location',            frame=frame)
+        cam_obj.keyframe_insert(data_path='rotation_quaternion', frame=frame)
+
+        if (i + 1) % 100 == 0:
+            print(
+                f'  {i + 1}/{n_total}  core=({core_pos.x:.1f}, {core_pos.y:.1f}, {core_pos.z:.1f}) BU'
+            )
+
+    if SMOOTH_CAMERA:
+        print('Smoothing camera F-curves ...')
+        _apply_fcurve_interp(cam_obj, 'location',            LOCATION_INTERP, LOCATION_HANDLE)
+        _apply_fcurve_interp(cam_obj, 'rotation_quaternion', ROTATION_INTERP)
+
+    print(
+        f'\nCamera done. "{CAMERA_NAME}" is the active scene camera.\n'
+        f'  Tracks grain core ({int(CORE_GRAIN_FRACTION * 100)}% closest grains).\n'
+        f'  CAM_DIST_BU={CAM_DIST_BU}  CAM_ANGLE_DEG={CAM_ANGLE_DEG}  FOV={CAMERA_FOV_DEG}°\n'
+        f'  Location: {LOCATION_INTERP}  Rotation: {ROTATION_INTERP} (SLERP, no roll)\n'
+        f'  clip [{CAM_CLIP_START}, {CAM_CLIP_END}] BU'
+    )
+
+
+# ── Earth model import machinery ──────────────────────────────────────────────
 
 @dataclass
 class BodyModelConfig:
-    """Settings for importing a detailed mesh parented to a trajectory Empty."""
     body_label: str
     model_path: str
-    model_format: str              # 'BLEND', 'FBX', or 'OBJ'
+    model_format: str
     part_names: list
     collection_name: Optional[str]
     model_reference_radius_bu: float
@@ -218,11 +320,6 @@ class BodyModelConfig:
     shell_scale: Optional[dict] = None
 
 
-def _get_fallback_radius():
-    """Fallback radius used when target_radius_bu is None (not needed for Earth)."""
-    return 0.01
-
-
 def _link_object_to_collection(obj, coll):
     try:
         coll.objects.link(obj)
@@ -231,7 +328,6 @@ def _link_object_to_collection(obj, coll):
 
 
 def _parent_part_to_empty(obj, empty_obj):
-    """Parent obj to empty_obj while preserving current world transform."""
     mw = obj.matrix_world.copy()
     obj.parent = empty_obj
     obj.matrix_parent_inverse = empty_obj.matrix_world.inverted()
@@ -239,7 +335,6 @@ def _parent_part_to_empty(obj, empty_obj):
 
 
 def _object_base_name(name):
-    """Strip Blender's numeric suffix (.001) for name comparison."""
     if '.' in name:
         head, tail = name.rsplit('.', 1)
         if tail.isdigit():
@@ -248,7 +343,6 @@ def _object_base_name(name):
 
 
 def _blend_object_names_for_append(library_object_names, cfg):
-    """Pick which object datablock names to append from a .blend."""
     names = list(library_object_names)
     if not names:
         print(f'  ERROR: {cfg.body_label}: .blend contains no object datablocks: {cfg.model_path}')
@@ -280,7 +374,6 @@ def _blend_object_names_for_append(library_object_names, cfg):
 
 
 def _combined_mesh_bbox_center_world(mesh_objs):
-    """World-space center of the AABB union of mesh objects."""
     if not mesh_objs:
         return Vector((0.0, 0.0, 0.0))
     min_co = Vector((1e30, 1e30, 1e30))
@@ -316,7 +409,6 @@ def _body_surface_mesh(mesh_objs, cfg):
 
 
 def _mesh_world_aabb_half_max_extent(obj):
-    """Approximate radius from world-space AABB (half longest edge)."""
     try:
         depsgraph = bpy.context.evaluated_depsgraph_get()
         ev = obj.evaluated_get(depsgraph)
@@ -358,7 +450,6 @@ def _body_reference_radius_bu(mesh_objs, cfg):
 
 
 def _prepare_body_meshes_layout(mesh_objs, empty_obj, cfg, target_radius_bu):
-    """Translate bbox center to Empty and scale to target_radius_bu."""
     if not mesh_objs:
         return
     E = empty_obj.matrix_world.translation.copy()
@@ -405,7 +496,6 @@ def _prepare_body_meshes_layout(mesh_objs, empty_obj, cfg, target_radius_bu):
 
 
 def import_body_model(empty_obj, cfg, target_radius_bu):
-    """Import a .blend file and parent mesh parts to empty_obj."""
     parented_count = 0
 
     if cfg.model_format != 'BLEND':
@@ -433,6 +523,7 @@ def import_body_model(empty_obj, cfg, target_radius_bu):
 
     coll = bpy.context.collection
     body_col = next((c for c in data_to.collections if c is not None), None)
+    blend_appended = []
 
     if use_collection and body_col is not None:
         coll.children.link(body_col)
@@ -452,7 +543,7 @@ def import_body_model(empty_obj, cfg, target_radius_bu):
             parented_count += 1
 
     print(f'Parented {parented_count} {cfg.body_label} model part(s) to "{empty_obj.name}".')
-    imported_bases = {_object_base_name(o.name) for o in blend_appended} if 'blend_appended' in dir() else set()
+    imported_bases = {_object_base_name(o.name) for o in blend_appended}
     expected = set(cfg.part_names)
     if imported_bases and imported_bases != expected:
         print(f'  NOTE: got base names {sorted(imported_bases)} (expected {sorted(expected)})')
@@ -492,26 +583,11 @@ if _bodies_available and EARTH_MODEL_PATH and os.path.exists(EARTH_MODEL_PATH):
     print(f'Importing Earth from {os.path.basename(EARTH_MODEL_PATH)} ...')
     bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
     earth_empty      = bpy.context.object
-    earth_empty.name = 'Earth'
+    earth_empty.name = EARTH_EMPTY_NAME
     import_body_model(earth_empty, earth_cfg, EARTH_PHYSICAL_RADIUS_KM * EARTH_VIS_SCALE)
-    # The Earth parts (Surface scan, volume-scatter Atmosphere, procedural Clouds)
-    # are appended with link=False, so their authored material/modifier stacks come
-    # across intact.  Do NOT force-add modifiers here — this script never applies
-    # transforms (it uses matrix_world only), so nothing strips them, and forcing a
-    # subsurf would override how the atmosphere/cloud meshes were authored.
-    # NOTE: auto_scale resizes the whole model uniformly.  The Surface texture and
-    # city-light emission are scale-invariant, but the volume-scatter atmosphere is
-    # NOT: its apparent thickness scales with the model size.  With EARTH_VIS_SCALE
-    # = 0.2 the scale_factor is ≈ 1.0, so the Earth is imported at native size and
-    # the atmosphere renders exactly as authored — no tweak needed.  If you change
-    # EARTH_VIS_SCALE, the volume thickness changes (optical depth = density × path):
-    # to compensate, divide the atmosphere's volume density by the scale_factor
-    # printed in the "Earth layout:" line above.
 elif EARTH_MODEL_PATH and not os.path.exists(EARTH_MODEL_PATH):
     print(f'WARNING: EARTH_MODEL_PATH not found ({EARTH_MODEL_PATH}) — Earth skipped.')
 
-# Collect Surface and (optionally) Clouds for per-frame rotation keyframing.
-# Atmosphere is omitted — spherically symmetric, so spinning it is invisible.
 _earth_spin_objs = []
 if earth_empty is not None:
     for _obj in earth_empty.children_recursive:
@@ -525,7 +601,7 @@ if earth_empty is not None:
     print(f'Earth rotation objects ({len(_earth_spin_objs)}): {[o.name for o in _earth_spin_objs]}')
 
 
-# ── Create Moon (UV sphere, same scale as Earth) ──────────────────────────────
+# ── Create Moon ───────────────────────────────────────────────────────────────
 moon_empty = None
 if _bodies_available:
     bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
@@ -552,7 +628,8 @@ if _bodies_available:
     _parent_part_to_empty(moon_sphere, moon_empty)
     print(f'Moon UV sphere created — radius {moon_radius_bu:.1f} BU')
 
-# ── Create Sun visual body (UV sphere, separate position/size scales) ──────────
+
+# ── Create Sun visual body ────────────────────────────────────────────────────
 sun_body_empty = None
 if _bodies_available:
     bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
@@ -567,24 +644,38 @@ if _bodies_available:
     if sun_mat is None:
         sun_mat = bpy.data.materials.new('Sun_Surface')
         sun_mat.use_nodes = True
-    _bsdf = sun_mat.node_tree.nodes.get('Principled BSDF')
-    if _bsdf:
-        _bsdf.inputs['Base Color'].default_value = SUN_COLOR
-        for _inp_name, _inp_val in (
-            ('Emission Color',    SUN_COLOR),
-            ('Emission',          SUN_COLOR),
-            ('Emission Strength', SUN_EMISSION_STRENGTH),
-        ):
-            if _inp_name in _bsdf.inputs:
-                _bsdf.inputs[_inp_name].default_value = _inp_val
+        _bsdf = sun_mat.node_tree.nodes.get('Principled BSDF')
+        if _bsdf:
+            _bsdf.inputs['Base Color'].default_value = SUN_COLOR
+            for _inp_name, _inp_val in (
+                ('Emission Color',    SUN_COLOR),
+                ('Emission',          SUN_COLOR),
+                ('Emission Strength', SUN_EMISSION_STRENGTH),
+            ):
+                if _inp_name in _bsdf.inputs:
+                    _bsdf.inputs[_inp_name].default_value = _inp_val
     if sun_sphere.data.materials:
         sun_sphere.data.materials[0] = sun_mat
     else:
         sun_sphere.data.materials.append(sun_mat)
     _parent_part_to_empty(sun_sphere, sun_body_empty)
-    print(f'Sun visual body created — radius {SUN_BODY_RADIUS_BU} BU, '
-          f'position scale {SUN_VIS_SCALE} BU/km (~'
-          f'{int(1.496e8 * SUN_VIS_SCALE)} BU from origin at 1 AU)')
+    print(
+        f'Sun visual body created — radius {SUN_BODY_RADIUS_BU} BU, '
+        f'position scale {SUN_VIS_SCALE} BU/km'
+    )
+
+
+# ── Shared grain material ─────────────────────────────────────────────────────
+mat = bpy.data.materials.get('DEM_Grain')
+if mat is None:
+    mat = bpy.data.materials.new('DEM_Grain')
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get('Principled BSDF')
+    if bsdf:
+        bsdf.inputs['Base Color'].default_value = GRAIN_COLOR
+        bsdf.inputs['Roughness'].default_value  = 0.85
+        bsdf.inputs['Metallic'].default_value   = 0.0
+
 
 # ── Create grain collection ───────────────────────────────────────────────────
 grain_col = bpy.data.collections.get(GRAIN_COLLECTION_NAME)
@@ -592,7 +683,7 @@ if grain_col is None:
     grain_col = bpy.data.collections.new(GRAIN_COLLECTION_NAME)
     bpy.context.scene.collection.children.link(grain_col)
 
-# ── First pass: read frame 1 and create one sphere per grain ──────────────────
+# ── First pass: create grain spheres ──────────────────────────────────────────
 first_df = pd.read_csv(csv_files[0])
 n_grains = len(first_df)
 print(f'Creating {n_grains} grain spheres from {os.path.basename(csv_files[0])} ...')
@@ -620,7 +711,7 @@ for _, row in first_df.iterrows():
 
 print('Spheres created.')
 
-# ── Second pass: keyframe grain positions, Sun lamp rotation, Earth position ──
+# ── Second pass: keyframe animation ───────────────────────────────────────────
 print(f'Keyframing {len(csv_files)} frames ...')
 
 bpy.context.scene.frame_start = 1
@@ -630,7 +721,6 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
     df = pd.read_csv(csv_file)
     bpy.context.scene.frame_set(frame_num)
 
-    # Grain positions.
     for _, row in df.iterrows():
         gid  = int(row['grain_id'])
         name = f'DEM_Grain_{gid:03d}'
@@ -644,7 +734,6 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
         )
         obj.keyframe_insert(data_path='location', frame=frame_num)
 
-    # Sun lamp and Earth both need the bodies CSV — read once per frame.
     if sun_lamp_obj is not None or earth_empty is not None:
         bodies_path = _bodies_csv_for(csv_file)
         if bodies_path:
@@ -652,7 +741,6 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
             sun_row = bdf.loc[bdf['name'] == 'Sun']
             apo_row = bdf.loc[bdf['name'] == 'Apophis']
 
-            # Sun lamp orientation.
             if sun_lamp_obj is not None and not sun_row.empty and not apo_row.empty:
                 sun_km  = sun_row[['x_km', 'y_km', 'z_km']].values[0]
                 apo_km  = apo_row[['x_km', 'y_km', 'z_km']].values[0]
@@ -662,11 +750,10 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
                 sun_lamp_obj.rotation_euler = rot
                 sun_lamp_obj.keyframe_insert(data_path='rotation_euler', frame=frame_num)
 
-            # Earth position relative to Apophis CoM.
             earth_row = bdf.loc[bdf['name'] == 'Earth']
             if earth_empty is not None and not earth_row.empty and not apo_row.empty:
                 earth_km = earth_row[['x_km', 'y_km', 'z_km']].values[0]
-                apo_km   = apo_row[['x_km',  'y_km',  'z_km']].values[0]
+                apo_km   = apo_row[['x_km', 'y_km', 'z_km']].values[0]
                 rel_km   = earth_km - apo_km
                 earth_empty.location = (
                     float(rel_km[0] * EARTH_VIS_SCALE),
@@ -675,7 +762,6 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
                 )
                 earth_empty.keyframe_insert(data_path='location', frame=frame_num)
 
-            # Earth rotation: spin Surface + Clouds about the tilted pole.
             if _earth_spin_objs:
                 time_s_val = float(bdf['time_s'].iloc[0]) if 'time_s' in bdf.columns else 0.0
                 spin_deg   = (time_s_val / EARTH_SIDEREAL_DAY_S) * 360.0 + EARTH_ROTATION_OFFSET_DEG
@@ -685,7 +771,6 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
                     _obj.rotation_quaternion = q
                     _obj.keyframe_insert(data_path='rotation_quaternion', frame=frame_num)
 
-            # Moon position: (moon_km - apophis_km) × EARTH_VIS_SCALE
             moon_row = bdf.loc[bdf['name'] == 'Moon']
             if moon_empty is not None and not moon_row.empty and not apo_row.empty:
                 moon_km = moon_row[['x_km', 'y_km', 'z_km']].values[0]
@@ -697,7 +782,6 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
                 )
                 moon_empty.keyframe_insert(data_path='location', frame=frame_num)
 
-            # Sun visual body position: (sun_km - apophis_km) × SUN_VIS_SCALE
             if sun_body_empty is not None and not sun_row.empty and not apo_row.empty:
                 sun_km_vis = sun_row[['x_km', 'y_km', 'z_km']].values[0]
                 rel_km     = sun_km_vis - apo_km
@@ -708,9 +792,9 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
                 )
                 sun_body_empty.keyframe_insert(data_path='location', frame=frame_num)
 
-# ── Third pass: smooth F-curves ───────────────────────────────────────────────
+# ── Third pass: smooth import F-curves ────────────────────────────────────────
 if SMOOTH_INTERPOLATION:
-    print('Smoothing F-curves ...')
+    print('Smoothing import F-curves ...')
     for gid in range(n_grains):
         obj = bpy.data.objects.get(f'DEM_Grain_{gid:03d}')
         if obj:
@@ -726,10 +810,7 @@ if SMOOTH_INTERPOLATION:
     if sun_body_empty is not None:
         _smooth_fcurves(sun_body_empty, 'location')
 
-# ── Set clip range on all viewports and cameras ───────────────────────────────
-# Earth sits ~7600 BU away at closest approach (radius 1274 BU) and recedes to
-# ~1e7 BU at the flyby edges; grains are within ±25 BU.  clip_end must reach Earth;
-# a moderate clip_start (not 1e-7) keeps the Solid/EEVEE viewport preview precise.
+# ── Viewport clip + EEVEE volumetrics (import stage) ───────────────────────────
 _clip_targets = 0
 for _area in (a for _s in bpy.data.screens for a in _s.areas if a.type == 'VIEW_3D'):
     for _space in (sp for sp in _area.spaces if sp.type == 'VIEW_3D'):
@@ -745,7 +826,6 @@ print(
     f'on {_clip_targets} viewport/camera target(s).'
 )
 
-# ── EEVEE volumetric range (viewport preview only; Cycles ignores these) ──────
 _ee = getattr(bpy.context.scene, 'eevee', None)
 if _ee is not None:
     _applied = []
@@ -763,20 +843,41 @@ if _ee is not None:
                 print(f'  NOTE: could not set scene.eevee.{_attr}: {_e}')
     print(
         f'EEVEE volumetric settings applied ({len(_applied)}): '
-        f'{", ".join(_applied) if _applied else "none — attrs not present in this version"}. '
-        '(Affects EEVEE preview only; Cycles ignores them.)'
+        f'{", ".join(_applied) if _applied else "none"}.'
     )
 
 print(
-    f'Done — {n_grains} DEM grains animated over {len(csv_files)} frame(s).\n'
-    'Positions are in Apophis body frame (Apophis at world origin).\n'
-    f'Earth Empty "Earth" is at (earth_km - apophis_km) × {EARTH_VIS_SCALE} BU/km '
-    f'(~7600 BU at closest approach; scale_factor ≈ 1.0 → native size, atmosphere preserved).\n'
-    'Moon Empty "Moon" is at (moon_km - apophis_km) × EARTH_VIS_SCALE BU/km.\n'
-    'Sun_Visual Empty is at (sun_km - apophis_km) × SUN_VIS_SCALE BU/km; '
-    f'Sun_Body sphere radius = {SUN_BODY_RADIUS_BU} BU.\n'
-    'Sun lamp "DEM_SunLight" direction is keyframed from physical PHANTOM positions (unchanged).\n'
-    f'Clip range [{VIEWPORT_CLIP_START}, {VIEWPORT_CLIP_END}] BU applied automatically '
-    '— do NOT run Viewport.py (it is tuned for the point-mass scene and Z-fights here).\n'
-    'Tune EARTH_VIS_SCALE, SUN_LAMP_ENERGY / SUN_LAMP_ANGLE at the top as needed.'
+    f'Import done — {n_grains} DEM grains over {len(csv_files)} frame(s).\n'
+    f'Earth at (earth_km - apophis_km) × {EARTH_VIS_SCALE} BU/km.\n'
+    'Sun lamp + Sun_Visual keyframed from bodies CSV.'
+)
+
+# ── Camera setup (DEMCamera.py) ───────────────────────────────────────────────
+if SETUP_CAMERA:
+    print('\n── Setting up tracking camera ──')
+    setup_dem_track_camera(earth_empty, csv_files)
+
+    if SETUP_CAM_FILL_LIGHT:
+        cam_obj = bpy.data.objects.get(CAMERA_NAME)
+        if cam_obj is not None:
+            existing_fill = bpy.data.objects.get(CAM_FILL_LIGHT_NAME)
+            if existing_fill:
+                bpy.data.objects.remove(existing_fill, do_unlink=True)
+            fill_data        = bpy.data.lights.new(CAM_FILL_LIGHT_NAME, CAM_FILL_LIGHT_TYPE)
+            fill_data.energy = CAM_FILL_LIGHT_ENERGY
+            fill_obj         = bpy.data.objects.new(CAM_FILL_LIGHT_NAME, fill_data)
+            bpy.context.scene.collection.objects.link(fill_obj)
+            fill_obj.parent = cam_obj
+            print(
+                f'Fill light "{CAM_FILL_LIGHT_NAME}" ({CAM_FILL_LIGHT_TYPE}, '
+                f'{CAM_FILL_LIGHT_ENERGY} W) parented to "{CAMERA_NAME}".'
+            )
+        else:
+            print(f'WARNING: camera "{CAMERA_NAME}" not found — fill light skipped.')
+else:
+    print('\nSETUP_CAMERA is False — skipping camera (run DEMCamera.py separately if needed).')
+
+print(
+    '\nAll done. Do NOT run Viewport.py (tuned for point-mass scale).\n'
+    'Tune paths at top: GRAINS_CSV_DIR, BODIES_CSV_DIR, camera block, SETUP_CAMERA.'
 )

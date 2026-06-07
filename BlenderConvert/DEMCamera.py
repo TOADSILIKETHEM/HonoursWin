@@ -15,13 +15,13 @@ CAMERA_FOV_DEG     = 70.0
 # Distance from the GRAIN CORE to the camera in Blender Units.
 # 50 BU = 1 km at GRAIN_VIS_SCALE=50.  The core (dense cluster) stays centred
 # and prominent at this distance throughout the run.
-CAM_DIST_BU        = 100.0
+CAM_DIST_BU        = 150.0
 
 # Degrees the camera is nudged from the anti-Earth axis toward the ecliptic
 # perpendicular.  This makes Earth appear this many degrees off to the side of
 # the grain core.  22° keeps Earth well inside the 35° horizontal half-FOV at
 # closest approach while leaving a clear gap next to the grain body.
-CAM_ANGLE_DEG      = 22.0
+CAM_ANGLE_DEG      = 30.0
 
 # Name of the Earth Empty created by DEMGrainsBlenderEarth.py.
 EARTH_EMPTY_NAME   = 'Earth'
@@ -49,6 +49,13 @@ ROTATION_INTERP    = 'LINEAR'   # LINEAR = SLERP between keyframes; eliminates
 
 CAM_CLIP_START     = 0.01
 CAM_CLIP_END       = 20_000_000.0
+
+# Fill light — parented to the camera so it co-moves each frame automatically.
+# Illuminates the camera-facing side of Apophis without extra keyframes.
+SETUP_CAM_FILL_LIGHT  = True
+CAM_FILL_LIGHT_NAME   = 'DEM_CamFill'
+CAM_FILL_LIGHT_TYPE   = 'POINT'   # POINT, SPOT, AREA, or SUN
+CAM_FILL_LIGHT_ENERGY = 20000.0
 # ─────────────────────────────────────────────────────────────────────────────
 # WHY THE CAMERA TRACKS THE GRAIN CORE, NOT THE ORIGIN
 # ─────────────────────────────────────────────────────────────────────────────
@@ -238,6 +245,20 @@ if SMOOTH_CAMERA:
     print('Smoothing F-curves ...')
     _apply_interp(cam_obj, 'location',            LOCATION_INTERP, LOCATION_HANDLE)
     _apply_interp(cam_obj, 'rotation_quaternion', ROTATION_INTERP)
+
+if SETUP_CAM_FILL_LIGHT:
+    existing_fill = bpy.data.objects.get(CAM_FILL_LIGHT_NAME)
+    if existing_fill:
+        bpy.data.objects.remove(existing_fill, do_unlink=True)
+    fill_data        = bpy.data.lights.new(CAM_FILL_LIGHT_NAME, CAM_FILL_LIGHT_TYPE)
+    fill_data.energy = CAM_FILL_LIGHT_ENERGY
+    fill_obj         = bpy.data.objects.new(CAM_FILL_LIGHT_NAME, fill_data)
+    scene.collection.objects.link(fill_obj)
+    fill_obj.parent = cam_obj
+    print(
+        f'Fill light "{CAM_FILL_LIGHT_NAME}" ({CAM_FILL_LIGHT_TYPE}, '
+        f'{CAM_FILL_LIGHT_ENERGY} W) parented to "{CAMERA_NAME}".'
+    )
 
 print(
     f'\nDone. "{CAMERA_NAME}" is now the active scene camera.\n'

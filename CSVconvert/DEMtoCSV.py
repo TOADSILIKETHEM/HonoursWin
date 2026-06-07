@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-INPUT_DIR    = "//wsl.localhost/Ubuntu/home/mboyle/Honours/sobol_mass_runs/sobol_20260601_204015_torque_align_obj_breakup_fine_dt/run_0001"
+INPUT_DIR    = "//wsl.localhost/Ubuntu/home/mboyle/Honours/sobol_mass_runs/sobol_20260607_122950_torque_align_obj_fine_dt_p155_np1000/run_0001"
 DUMP_PATTERN = "sobol_[0-9]*"
 
 # Root folder for all DEM CSV output.  Subfolders are created automatically

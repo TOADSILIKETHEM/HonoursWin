@@ -9,24 +9,26 @@ structural representations of Apophis and assess which physical parameters most
 drive divergence in outcomes.
 
 ## Research Goals
-1. PRIMARY: Compare three Apophis structural models:
-   - Point mass (baseline)
-   - Extended fluid body (SPH via PHANTOM)
-   - DEM bilobed rubble-pile (pkdgrav with SSDEM)
-2. SECONDARY: Sensitivity analysis to identify which input parameters most
-   influence simulation outcomes (bulk density, porosity, cohesive strength)
+1. PRIMARY: Compare Apophis structural models across increasing complexity:
+   - Point mass (baseline) — done
+   - DEM rubble-pile via PHANTOM + supervisor's DEM module — done
+   - Combined DEM+SPH (grain matrix + boulders) — planned; the intended final model
+2. SECONDARY: Sensitivity analysis (Sobol indices with Saltelli sampling) to identify
+   which input parameters most influence simulation outcomes (bulk density, porosity,
+   cohesive strength). Infrastructure working; thesis-quality runs not yet finalised.
 
 ## Simulation Codes
-- **PHANTOM**: SPH code used for the fluid-body representation.
-  - IMPORTANT: PHANTOM has NO native solid-body mechanics — no deviatoric
-    stress, plastic yield, or fracture models. It treats Apophis as a fluid,
-    not a solid or true rubble-pile. This is a known limitation.
-  - Output: splash dump files (.h5 / binary)
-- **pkdgrav (with SSDEM)**: Handles granular/DEM dynamics for the rubble-pile
-  model. Supervisor Daniel runs and maintains this code.
-  - Output: binary .ss files; use splash2csv to convert
+- **PHANTOM**: The sole simulation code for all models (point-mass, DEM, and
+  future combined DEM+SPH).
+  - IMPORTANT: PHANTOM has NO *native* solid-body mechanics. However, the
+    project uses a custom DEM physics module developed by supervisor Daniel that
+    adds grain contact forces and granular dynamics to PHANTOM. The student is
+    actively upgrading this module. The "DEM" in this project is PHANTOM-native
+    (64 sink particles as grains), NOT pkdgrav/SSDEM.
+  - pkdgrav has NOT been used and is NOT planned; it appears in literature context only.
+  - Output: binary splash dump files
 - **sarracen**: Python library for reading PHANTOM splash dumps into
-  pandas DataFrames / HDF5 / CSV for post-processing and Blender import
+  pandas DataFrames / CSV for post-processing and Blender import
 
 ## Key Physical Parameters
 - Bulk density (target ~1300 kg/m³ for Apophis)
@@ -36,10 +38,10 @@ drive divergence in outcomes.
 - Flyby orbital parameters (closest approach ~31,000 km, April 2029)
 
 ## Sensitivity Analysis Methods (Secondary Goal)
-- Latin Hypercube Sampling (LHS) for parameter space coverage
-- Morris screening for parameter ranking
-- Sobol indices for variance decomposition
+- **Sobol indices with Saltelli sampling** — primary method for variance decomposition
 - Key question: which of density / porosity / cohesion drives outcome divergence?
+- Infrastructure working (sobol_input_matrix.csv, run_sobol_phantom.sh); thesis-quality
+  runs not yet finalised. LHS and Morris are not in scope.
 
 ## Visualisation Pipeline
 PHANTOM output → sarracen → CSV/HDF5 → Blender (rendered simulation output)
@@ -48,7 +50,8 @@ PHANTOM output → sarracen → CSV/HDF5 → Blender (rendered simulation output
 - Python preferred for post-processing and analysis scripts
 - Use sarracen for all PHANTOM dump I/O (avoid raw binary parsing)
 - Keep simulation config files version-controlled
-- Separate directories for: /simulations, /analysis, /figures, /thesis
+- Actual directory layout: CSVconvert/, BlenderConvert/, csv_output/, dem_bodies_output/,
+  dem_grains_output/, "Data analysis/", Rcode/ — see CLAUDE.md for the full layout
 
 ## Literature & Key References
 - Hirabayashi & Kim 2021: FEM stress modelling of Apophis
@@ -61,10 +64,11 @@ PHANTOM output → sarracen → CSV/HDF5 → Blender (rendered simulation output
   tidal loading conditions
 
 ## Thesis Status (update as needed)
-- [ ] PHANTOM point-mass and fluid-body simulations
-- [ ] pkdgrav DEM bilobed simulation (with Daniel)
-- [ ] Sensitivity analysis runs
-- [ ] sarracen → Blender visualisation pipeline
+- [x] PHANTOM point-mass simulation
+- [x] PHANTOM DEM rubble-pile simulation (using supervisor's DEM module)
+- [ ] Combined DEM+SPH simulation (planned — grain matrix + boulders)
+- [ ] Sensitivity analysis — Sobol runs (infrastructure done; thesis runs not yet finalised)
+- [x] sarracen → Blender visualisation pipeline (mainly complete)
 - [ ] Literature review (draft in progress)
 - [ ] Thesis writing phases: planning → simulations → analysis → writing
 
@@ -72,6 +76,21 @@ PHANTOM output → sarracen → CSV/HDF5 → Blender (rendered simulation output
 - Assume familiarity with SPH, DEM, and planetary science terminology
 - Do not oversimplify — this is Honours-level research
 - When writing or editing thesis prose, target H1 quality
-- Flag if a suggestion conflicts with PHANTOM's known limitations (no solid mechanics)
+- Flag if a suggestion conflicts with PHANTOM's native limitations (no built-in solid
+  mechanics) — but note the project uses supervisor Daniel's DEM module to add these
 - Prefer Python solutions for data analysis; numpy, pandas, matplotlib, sarracen
-- When uncertain about simulation specifics, ask rather than assume do not make assumptions
+- CONFIRM, DON'T ASSUME. This project is large and the user cannot restate every
+  detail in each request. When a fact that would change the approach is not in the
+  repo or these rules, ask a short clarifying question BEFORE acting — do not pick a
+  default and run with it. A 10-second question beats rounds of rework on a wrong
+  assumption. If you must proceed unconfirmed, state the assumption explicitly so it
+  can be corrected early. This applies to simulation specifics AND tooling:
+  - Blender renders in **Cycles**, not EEVEE. The diagnosis of a rendering problem
+    differs completely (Cycles ray-traces: no depth-buffer Z-fighting, no froxel /
+    volumetric-range settings; EEVEE has both). Never assume the engine or give an
+    EEVEE-only explanation without confirming.
+  - Confirm the Blender version, which .blend/scene/object is in play, and how the
+    source file looked, before theorising about an imported asset.
+  - When debugging a visual glitch, check the simplest common cause first (e.g.
+    overlapping/coincident geometry → Z-fighting) before elaborate precision/scale
+    theories.
