@@ -17,16 +17,19 @@ from typing import Optional
 from mathutils import Matrix, Vector
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-# Path to the dem_grains_output/ folder produced by DEMtoCSV.py.
-GRAINS_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/1000np Alinged/run_0001_grains_output/'
+# Paths from DEMtoCSV.py → DEMCSVs/<sim_name>/run_XXXX_grains_output|_bodies_output/
+GRAINS_CSV_DIR = (
+    'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/'
+    'sobol_20260705_131545_baseline_58deg/run_0001_grains_output/'
+)
+BODIES_CSV_DIR = (
+    'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/'
+    'sobol_20260705_131545_baseline_58deg/run_0001_bodies_output/'
+)
+# None = auto-detect from bodies CSV; True/False = force solar-system import on/off.
+IMPORT_SOLAR_SYSTEM = None
 
-# Path to the bodies output folder — filenames match GRAINS_CSV_DIR.
-# Used to read the Sun, Earth, and Apophis positions each frame.
-# Set to '' or a nonexistent path to skip Sun lamp and Earth entirely.
-BODIES_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/1000np Alinged/run_0001_bodies_output/'
-# 1000np aligned run, 5 min dumps (~1297 frames).
-
-# Run DEMCamera.py logic after import (requires Earth Empty + bodies CSVs).
+# Run DEMCamera logic after import. Auto: Earth-track if solar system, else grain-only.
 SETUP_CAMERA = True
 
 # Sun lamp settings.
@@ -90,6 +93,11 @@ LOCATION_HANDLE     = 'AUTO_CLAMPED'
 ROTATION_INTERP     = 'LINEAR'
 CAM_CLIP_START      = 0.01
 CAM_CLIP_END        = 20_000_000.0
+# None = auto from Earth Empty; 'earth_track' | 'grain_only' to force.
+CAMERA_MODE = None
+CAM_GRAIN_ONLY_AZIMUTH_DEG   = 45.0
+CAM_GRAIN_ONLY_ELEVATION_DEG = 20.0
+APOPHIS_ONLY_SUN_DIRECTION   = (1.0, 0.0, 0.0)
 
 # Fill light — parented to the camera so it co-moves each frame automatically.
 # Illuminates the camera-facing side of Apophis without extra keyframes.
@@ -115,8 +123,8 @@ if not csv_files:
 
 print(f'Found {len(csv_files)} grain CSV(s).')
 
-_bodies_available = os.path.isdir(BODIES_CSV_DIR)
-if not _bodies_available:
+_bodies_available = bool(BODIES_CSV_DIR) and os.path.isdir(BODIES_CSV_DIR)
+if BODIES_CSV_DIR and not _bodies_available:
     print(
         f'WARNING: BODIES_CSV_DIR not found ({BODIES_CSV_DIR})\n'
         '  Sun lamp and Earth will be skipped.'
@@ -129,6 +137,28 @@ def _bodies_csv_for(grains_path):
         return None
     p = os.path.join(BODIES_CSV_DIR, os.path.basename(grains_path))
     return p if os.path.exists(p) else None
+
+
+def _detect_solar_system_bodies(grain_files):
+    """True when bodies CSV includes solar-system rows (not apophis_only-only)."""
+    bodies_path = _bodies_csv_for(grain_files[0])
+    if not bodies_path:
+        return False
+    try:
+        names = set(pd.read_csv(bodies_path, usecols=['name'])['name'].astype(str))
+    except (ValueError, KeyError, OSError):
+        return False
+    return 'Earth' in names or 'Sun' in names
+
+
+_has_solar_system = (
+    bool(IMPORT_SOLAR_SYSTEM)
+    if IMPORT_SOLAR_SYSTEM is not None
+    else _detect_solar_system_bodies(csv_files)
+)
+print(
+    f'Run mode: {"full solar system" if _has_solar_system else "apophis_only (grains only)"}.'
+)
 
 
 def _smooth_fcurves(obj, data_path):
@@ -199,12 +229,23 @@ def _grain_core(csv_path, fraction):
 def setup_dem_track_camera(earth_empty, grain_files):
     """
     Create and keyframe DEM_TrackCam — same behaviour as DEMCamera.py.
-    Call after import; earth_empty must be the animated Earth Empty.
+    Uses Earth-tracking when earth_empty is set (full solar system), else grain-only orbit.
     """
-    if earth_empty is None:
+    use_earth_track = (
+        CAMERA_MODE == 'earth_track'
+        if CAMERA_MODE in ('earth_track', 'grain_only')
+        else earth_empty is not None
+    )
+    if CAMERA_MODE == 'earth_track' and earth_empty is None:
         raise RuntimeError(
-            f'Object "{EARTH_EMPTY_NAME}" not found. '
-            'Earth import was skipped — camera needs the Earth Empty keyframes.'
+            f'CAMERA_MODE="earth_track" but "{EARTH_EMPTY_NAME}" not found.'
+        )
+    if use_earth_track:
+        print(f'Camera mode: Earth-tracking (using "{EARTH_EMPTY_NAME}" keyframes).')
+    else:
+        print(
+            'Camera mode: grain-only orbit '
+            f'(az={CAM_GRAIN_ONLY_AZIMUTH_DEG}°, el={CAM_GRAIN_ONLY_ELEVATION_DEG}°).'
         )
 
     scene   = bpy.context.scene
@@ -244,6 +285,15 @@ def setup_dem_track_camera(earth_empty, grain_files):
     _Z        = Vector((0.0, 0.0, 1.0))
     _X        = Vector((1.0, 0.0, 0.0))
 
+    if not use_earth_track:
+        az_rad = math.radians(CAM_GRAIN_ONLY_AZIMUTH_DEG)
+        el_rad = math.radians(CAM_GRAIN_ONLY_ELEVATION_DEG)
+        grain_only_offset = Vector((
+            math.cos(el_rad) * math.cos(az_rad),
+            math.cos(el_rad) * math.sin(az_rad),
+            math.sin(el_rad),
+        )).normalized()
+
     prev_q  = None
     n_total = min(n_frames, n_csvs)
 
@@ -253,23 +303,26 @@ def setup_dem_track_camera(earth_empty, grain_files):
         scene.frame_set(frame)
 
         core_pos = _grain_core(csv_path, CORE_GRAIN_FRACTION)
-        earth_pos = earth_empty.matrix_world.translation.copy()
 
-        earth_vec = earth_pos - core_pos
-        earth_dist_core = earth_vec.length
-        if earth_dist_core > 1e-6:
-            earth_from_core = earth_vec / earth_dist_core
+        if use_earth_track:
+            earth_pos = earth_empty.matrix_world.translation.copy()
+            earth_vec = earth_pos - core_pos
+            earth_dist_core = earth_vec.length
+            if earth_dist_core > 1e-6:
+                earth_from_core = earth_vec / earth_dist_core
+            else:
+                earth_from_core = _X.copy()
+
+            offset_dir = earth_from_core.cross(_Z)
+            if offset_dir.length < 1e-4:
+                offset_dir = earth_from_core.cross(_X)
+            if offset_dir.length < 1e-4:
+                offset_dir = Vector((0.0, 1.0, 0.0))
+            offset_dir.normalize()
+
+            cam_pos = core_pos + (-earth_from_core * cos_a + offset_dir * sin_a) * CAM_DIST_BU
         else:
-            earth_from_core = _X.copy()
-
-        offset_dir = earth_from_core.cross(_Z)
-        if offset_dir.length < 1e-4:
-            offset_dir = earth_from_core.cross(_X)
-        if offset_dir.length < 1e-4:
-            offset_dir = Vector((0.0, 1.0, 0.0))
-        offset_dir.normalize()
-
-        cam_pos = core_pos + (-earth_from_core * cos_a + offset_dir * sin_a) * CAM_DIST_BU
+            cam_pos = core_pos + grain_only_offset * CAM_DIST_BU
         look_vec = (core_pos - cam_pos).normalized()
         q = look_vec.to_track_quat('-Z', 'Y')
 
@@ -294,8 +347,9 @@ def setup_dem_track_camera(earth_empty, grain_files):
 
     print(
         f'\nCamera done. "{CAMERA_NAME}" is the active scene camera.\n'
+        f'  Mode: {"Earth-tracking" if use_earth_track else "grain-only orbit"}.\n'
         f'  Tracks grain core ({int(CORE_GRAIN_FRACTION * 100)}% closest grains).\n'
-        f'  CAM_DIST_BU={CAM_DIST_BU}  CAM_ANGLE_DEG={CAM_ANGLE_DEG}  FOV={CAMERA_FOV_DEG}°\n'
+        f'  CAM_DIST_BU={CAM_DIST_BU}  FOV={CAMERA_FOV_DEG}°\n'
         f'  Location: {LOCATION_INTERP}  Rotation: {ROTATION_INTERP} (SLERP, no roll)\n'
         f'  clip [{CAM_CLIP_START}, {CAM_CLIP_END}] BU'
     )
@@ -551,21 +605,30 @@ def import_body_model(empty_obj, cfg, target_radius_bu):
 
 # ── Create Sun lamp ───────────────────────────────────────────────────────────
 sun_lamp_obj = None
-if _bodies_available:
-    existing = bpy.data.objects.get('DEM_SunLight')
-    if existing:
-        bpy.data.objects.remove(existing, do_unlink=True)
+existing = bpy.data.objects.get('DEM_SunLight')
+if existing:
+    bpy.data.objects.remove(existing, do_unlink=True)
+if _has_solar_system and _bodies_available:
     lamp_data        = bpy.data.lights.new('DEM_SunLight', 'SUN')
     lamp_data.energy = SUN_LAMP_ENERGY
     lamp_data.angle  = SUN_LAMP_ANGLE
     sun_lamp_obj     = bpy.data.objects.new('DEM_SunLight', lamp_data)
     bpy.context.scene.collection.objects.link(sun_lamp_obj)
-    print('Sun lamp "DEM_SunLight" created.')
+    print('Sun lamp "DEM_SunLight" created (keyframed from bodies CSV).')
+elif not _has_solar_system:
+    lamp_data        = bpy.data.lights.new('DEM_SunLight', 'SUN')
+    lamp_data.energy = SUN_LAMP_ENERGY
+    lamp_data.angle  = SUN_LAMP_ANGLE
+    sun_lamp_obj     = bpy.data.objects.new('DEM_SunLight', lamp_data)
+    bpy.context.scene.collection.objects.link(sun_lamp_obj)
+    sun_dir = mathutils.Vector(APOPHIS_ONLY_SUN_DIRECTION).normalized()
+    sun_lamp_obj.rotation_euler = (-sun_dir).to_track_quat('-Z', 'Y').to_euler()
+    print('Sun lamp "DEM_SunLight" created (fixed direction for apophis_only).')
 
 
 # ── Import Earth model ────────────────────────────────────────────────────────
 earth_empty = None
-if _bodies_available and EARTH_MODEL_PATH and os.path.exists(EARTH_MODEL_PATH):
+if _has_solar_system and _bodies_available and EARTH_MODEL_PATH and os.path.exists(EARTH_MODEL_PATH):
     earth_cfg = BodyModelConfig(
         body_label='Earth',
         model_path=EARTH_MODEL_PATH,
@@ -603,7 +666,7 @@ if earth_empty is not None:
 
 # ── Create Moon ───────────────────────────────────────────────────────────────
 moon_empty = None
-if _bodies_available:
+if _has_solar_system and _bodies_available:
     bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
     moon_empty      = bpy.context.object
     moon_empty.name = 'Moon'
@@ -631,7 +694,7 @@ if _bodies_available:
 
 # ── Create Sun visual body ────────────────────────────────────────────────────
 sun_body_empty = None
-if _bodies_available:
+if _has_solar_system and _bodies_available:
     bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
     sun_body_empty      = bpy.context.object
     sun_body_empty.name = 'Sun_Visual'
@@ -734,7 +797,7 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
         )
         obj.keyframe_insert(data_path='location', frame=frame_num)
 
-    if sun_lamp_obj is not None or earth_empty is not None:
+    if _has_solar_system and (sun_lamp_obj is not None or earth_empty is not None):
         bodies_path = _bodies_csv_for(csv_file)
         if bodies_path:
             bdf     = pd.read_csv(bodies_path)
@@ -846,11 +909,17 @@ if _ee is not None:
         f'{", ".join(_applied) if _applied else "none"}.'
     )
 
-print(
-    f'Import done — {n_grains} DEM grains over {len(csv_files)} frame(s).\n'
-    f'Earth at (earth_km - apophis_km) × {EARTH_VIS_SCALE} BU/km.\n'
-    'Sun lamp + Sun_Visual keyframed from bodies CSV.'
-)
+if _has_solar_system:
+    print(
+        f'Import done — {n_grains} DEM grains over {len(csv_files)} frame(s).\n'
+        f'Earth at (earth_km - apophis_km) × {EARTH_VIS_SCALE} BU/km.\n'
+        'Sun lamp + Sun_Visual keyframed from bodies CSV.'
+    )
+else:
+    print(
+        f'Import done — {n_grains} DEM grains over {len(csv_files)} frame(s).\n'
+        'apophis_only run: grains only; fixed Sun lamp (no Earth/Sun/Moon bodies).'
+    )
 
 # ── Camera setup (DEMCamera.py) ───────────────────────────────────────────────
 if SETUP_CAMERA:

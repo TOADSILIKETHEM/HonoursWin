@@ -9,14 +9,23 @@ from typing import Optional
 from mathutils import Matrix, Vector
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-# Path to the dem_grains_output/ folder produced by DEMtoCSV.py.
-GRAINS_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/torque_align_obj_fine_dt/run_0001_grains_output/'
-
-# Path to the bodies output folder — filenames match GRAINS_CSV_DIR.
-# Used to read the Sun, Earth, and Apophis positions each frame.
-# Set to '' or a nonexistent path to skip Sun lamp and Earth entirely.
-BODIES_CSV_DIR = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/torque_align_obj_fine_dt/run_0001_bodies_output/'
-# OBJ-cropped opposite_near_h breakup, 5 min dumps (~1297 frames): fine_dt batch.
+# Paths from DEMtoCSV.py → DEMCSVs/<sim_name>/run_XXXX_grains_output|_bodies_output/
+# See docs/BATCHES_VIZ.md for canonical batch → folder mapping.
+GRAINS_CSV_DIR = (
+    'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/'
+    'sobol_20260705_131545_baseline_58deg/run_0001_grains_output/'
+)
+BODIES_CSV_DIR = (
+    'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/'
+    'sobol_20260705_131545_baseline_58deg/run_0001_bodies_output/'
+)
+# Full solar system (Earth flyby): bodies CSV has Sun…Neptune + Apophis (11 rows).
+# apophis_only=T: bodies CSV has synthetic Apophis only — Earth/Sun/Moon are skipped
+# automatically; grains still import from x_vis/y_vis/z_vis.
+# Legacy flat layout (DEMCSVs/torque_align_obj/run_0001_*_output/) still works if paths match.
+# Set BODIES_CSV_DIR to '' to skip all bodies-driven animation.
+# None = auto-detect from bodies CSV; True/False = force solar-system import on/off.
+IMPORT_SOLAR_SYSTEM = None
 
 # Sun lamp settings.
 SUN_LAMP_ENERGY = 10.0
@@ -146,8 +155,8 @@ if not csv_files:
 
 print(f'Found {len(csv_files)} grain CSV(s).')
 
-_bodies_available = os.path.isdir(BODIES_CSV_DIR)
-if not _bodies_available:
+_bodies_available = bool(BODIES_CSV_DIR) and os.path.isdir(BODIES_CSV_DIR)
+if BODIES_CSV_DIR and not _bodies_available:
     print(
         f'WARNING: BODIES_CSV_DIR not found ({BODIES_CSV_DIR})\n'
         '  Sun lamp and Earth will be skipped.'
@@ -160,6 +169,28 @@ def _bodies_csv_for(grains_path):
         return None
     p = os.path.join(BODIES_CSV_DIR, os.path.basename(grains_path))
     return p if os.path.exists(p) else None
+
+
+def _detect_solar_system_bodies(grain_files):
+    """True when bodies CSV includes solar-system rows (not apophis_only-only)."""
+    bodies_path = _bodies_csv_for(grain_files[0])
+    if not bodies_path:
+        return False
+    try:
+        names = set(pd.read_csv(bodies_path, usecols=['name'])['name'].astype(str))
+    except (ValueError, KeyError, OSError):
+        return False
+    return 'Earth' in names or 'Sun' in names
+
+
+_has_solar_system = (
+    bool(IMPORT_SOLAR_SYSTEM)
+    if IMPORT_SOLAR_SYSTEM is not None
+    else _detect_solar_system_bodies(csv_files)
+)
+print(
+    f'Run mode: {"full solar system" if _has_solar_system else "apophis_only (grains only)"}.'
+)
 
 
 # ── Shared grain material ─────────────────────────────────────────────────────
@@ -459,22 +490,35 @@ def import_body_model(empty_obj, cfg, target_radius_bu):
 
 
 # ── Create Sun lamp ───────────────────────────────────────────────────────────
+# Full solar-system runs: keyframe orientation from bodies CSV each frame.
+# apophis_only: fixed ecliptic direction (no Sun row in bodies CSV).
+APOPHIS_ONLY_SUN_DIRECTION = (1.0, 0.0, 0.0)
+
 sun_lamp_obj = None
-if _bodies_available:
-    existing = bpy.data.objects.get('DEM_SunLight')
-    if existing:
-        bpy.data.objects.remove(existing, do_unlink=True)
+existing = bpy.data.objects.get('DEM_SunLight')
+if existing:
+    bpy.data.objects.remove(existing, do_unlink=True)
+if _has_solar_system and _bodies_available:
     lamp_data        = bpy.data.lights.new('DEM_SunLight', 'SUN')
     lamp_data.energy = SUN_LAMP_ENERGY
     lamp_data.angle  = SUN_LAMP_ANGLE
     sun_lamp_obj     = bpy.data.objects.new('DEM_SunLight', lamp_data)
     bpy.context.scene.collection.objects.link(sun_lamp_obj)
-    print('Sun lamp "DEM_SunLight" created.')
+    print('Sun lamp "DEM_SunLight" created (keyframed from bodies CSV).')
+elif not _has_solar_system:
+    lamp_data        = bpy.data.lights.new('DEM_SunLight', 'SUN')
+    lamp_data.energy = SUN_LAMP_ENERGY
+    lamp_data.angle  = SUN_LAMP_ANGLE
+    sun_lamp_obj     = bpy.data.objects.new('DEM_SunLight', lamp_data)
+    bpy.context.scene.collection.objects.link(sun_lamp_obj)
+    sun_dir = mathutils.Vector(APOPHIS_ONLY_SUN_DIRECTION).normalized()
+    sun_lamp_obj.rotation_euler = (-sun_dir).to_track_quat('-Z', 'Y').to_euler()
+    print('Sun lamp "DEM_SunLight" created (fixed direction for apophis_only).')
 
 
 # ── Import Earth model ────────────────────────────────────────────────────────
 earth_empty = None
-if _bodies_available and EARTH_MODEL_PATH and os.path.exists(EARTH_MODEL_PATH):
+if _has_solar_system and _bodies_available and EARTH_MODEL_PATH and os.path.exists(EARTH_MODEL_PATH):
     earth_cfg = BodyModelConfig(
         body_label='Earth',
         model_path=EARTH_MODEL_PATH,
@@ -527,7 +571,7 @@ if earth_empty is not None:
 
 # ── Create Moon (UV sphere, same scale as Earth) ──────────────────────────────
 moon_empty = None
-if _bodies_available:
+if _has_solar_system and _bodies_available:
     bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
     moon_empty      = bpy.context.object
     moon_empty.name = 'Moon'
@@ -554,7 +598,7 @@ if _bodies_available:
 
 # ── Create Sun visual body (UV sphere, separate position/size scales) ──────────
 sun_body_empty = None
-if _bodies_available:
+if _has_solar_system and _bodies_available:
     bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
     sun_body_empty      = bpy.context.object
     sun_body_empty.name = 'Sun_Visual'
@@ -644,8 +688,8 @@ for frame_num, csv_file in enumerate(csv_files, start=1):
         )
         obj.keyframe_insert(data_path='location', frame=frame_num)
 
-    # Sun lamp and Earth both need the bodies CSV — read once per frame.
-    if sun_lamp_obj is not None or earth_empty is not None:
+    # Solar-system extras need the bodies CSV — read once per frame.
+    if _has_solar_system and (sun_lamp_obj is not None or earth_empty is not None):
         bodies_path = _bodies_csv_for(csv_file)
         if bodies_path:
             bdf     = pd.read_csv(bodies_path)
@@ -767,16 +811,24 @@ if _ee is not None:
         '(Affects EEVEE preview only; Cycles ignores them.)'
     )
 
-print(
-    f'Done — {n_grains} DEM grains animated over {len(csv_files)} frame(s).\n'
-    'Positions are in Apophis body frame (Apophis at world origin).\n'
-    f'Earth Empty "Earth" is at (earth_km - apophis_km) × {EARTH_VIS_SCALE} BU/km '
-    f'(~7600 BU at closest approach; scale_factor ≈ 1.0 → native size, atmosphere preserved).\n'
-    'Moon Empty "Moon" is at (moon_km - apophis_km) × EARTH_VIS_SCALE BU/km.\n'
-    'Sun_Visual Empty is at (sun_km - apophis_km) × SUN_VIS_SCALE BU/km; '
-    f'Sun_Body sphere radius = {SUN_BODY_RADIUS_BU} BU.\n'
-    'Sun lamp "DEM_SunLight" direction is keyframed from physical PHANTOM positions (unchanged).\n'
-    f'Clip range [{VIEWPORT_CLIP_START}, {VIEWPORT_CLIP_END}] BU applied automatically '
-    '— do NOT run Viewport.py (it is tuned for the point-mass scene and Z-fights here).\n'
-    'Tune EARTH_VIS_SCALE, SUN_LAMP_ENERGY / SUN_LAMP_ANGLE at the top as needed.'
-)
+if _has_solar_system:
+    print(
+        f'Done — {n_grains} DEM grains animated over {len(csv_files)} frame(s).\n'
+        'Positions are in Apophis body frame (Apophis at world origin).\n'
+        f'Earth Empty "Earth" is at (earth_km - apophis_km) × {EARTH_VIS_SCALE} BU/km '
+        f'(~7600 BU at closest approach; scale_factor ≈ 1.0 → native size, atmosphere preserved).\n'
+        'Moon Empty "Moon" is at (moon_km - apophis_km) × EARTH_VIS_SCALE BU/km.\n'
+        'Sun_Visual Empty is at (sun_km - apophis_km) × SUN_VIS_SCALE BU/km; '
+        f'Sun_Body sphere radius = {SUN_BODY_RADIUS_BU} BU.\n'
+        'Sun lamp "DEM_SunLight" direction is keyframed from physical PHANTOM positions.\n'
+        f'Clip range [{VIEWPORT_CLIP_START}, {VIEWPORT_CLIP_END}] BU applied automatically '
+        '— do NOT run Viewport.py (it is tuned for the point-mass scene and Z-fights here).\n'
+        'Tune EARTH_VIS_SCALE, SUN_LAMP_ENERGY / SUN_LAMP_ANGLE at the top as needed.'
+    )
+else:
+    print(
+        f'Done — {n_grains} DEM grains animated over {len(csv_files)} frame(s).\n'
+        'apophis_only run: grains in body frame (Apophis CoM at origin); no Earth/Sun/Moon.\n'
+        'Sun lamp uses fixed direction — adjust APOPHIS_ONLY_SUN_DIRECTION if needed.\n'
+        'For camera framing on grain-only runs, use DEMCamera.py grain-only mode.'
+    )

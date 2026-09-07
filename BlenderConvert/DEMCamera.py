@@ -27,11 +27,18 @@ CAM_ANGLE_DEG      = 30.0
 EARTH_EMPTY_NAME   = 'Earth'
 
 # Path to the grain CSVs — MUST match GRAINS_CSV_DIR in DEMGrainsBlenderEarth.py.
-# The camera reads x_vis/y_vis/z_vis from these to locate the dense grain core.
 GRAIN_CSV_DIR = (
-    'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/'
-    'Honours/Code/DEMCSVs/torque_align_obj_fine_dt/run_0001_grains_output/'
+    'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/'
+    'sobol_20260705_131545_baseline_58deg/run_0001_grains_output/'
 )
+
+# None = auto: Earth-tracking if Earth Empty exists, else grain-only orbit.
+# 'earth_track' | 'grain_only' force a mode.
+CAMERA_MODE = None
+
+# Grain-only camera (apophis_only runs): fixed offset from dense core, no Earth framing.
+CAM_GRAIN_ONLY_AZIMUTH_DEG   = 45.0
+CAM_GRAIN_ONLY_ELEVATION_DEG = 20.0
 
 # Fraction of grains (closest to the CoM) used to estimate the dense core.
 # 0.80 = use the 80% of grains nearest the mass-weighted CoM (origin).  This
@@ -84,10 +91,22 @@ CAM_FILL_LIGHT_ENERGY = 20000.0
 # ─────────────────────────────────────────────────────────────────────────────
 
 earth_empty = bpy.data.objects.get(EARTH_EMPTY_NAME)
-if earth_empty is None:
+_use_earth_track = (
+    CAMERA_MODE == 'earth_track'
+    if CAMERA_MODE in ('earth_track', 'grain_only')
+    else earth_empty is not None
+)
+if CAMERA_MODE == 'earth_track' and earth_empty is None:
     raise RuntimeError(
-        f'Object "{EARTH_EMPTY_NAME}" not found. '
-        'Run DEMGrainsBlenderEarth.py first.'
+        f'CAMERA_MODE="earth_track" but "{EARTH_EMPTY_NAME}" not found. '
+        'Run DEMGrainsBlenderEarth.py on a full solar-system batch first.'
+    )
+if _use_earth_track:
+    print(f'Camera mode: Earth-tracking (using "{EARTH_EMPTY_NAME}" keyframes).')
+else:
+    print(
+        'Camera mode: grain-only orbit '
+        f'(az={CAM_GRAIN_ONLY_AZIMUTH_DEG}°, el={CAM_GRAIN_ONLY_ELEVATION_DEG}°).'
     )
 
 # ── Load grain CSVs (sorted, same order as DEMGrainsBlenderEarth.py) ─────────
@@ -156,6 +175,15 @@ sin_a     = math.sin(angle_rad)
 _Z        = Vector((0.0, 0.0, 1.0))
 _X        = Vector((1.0, 0.0, 0.0))
 
+if not _use_earth_track:
+    az_rad = math.radians(CAM_GRAIN_ONLY_AZIMUTH_DEG)
+    el_rad = math.radians(CAM_GRAIN_ONLY_ELEVATION_DEG)
+    _grain_only_offset = Vector((
+        math.cos(el_rad) * math.cos(az_rad),
+        math.cos(el_rad) * math.sin(az_rad),
+        math.sin(el_rad),
+    )).normalized()
+
 
 def _apply_interp(obj, data_path, interp, handle=None):
     if not obj.animation_data or not obj.animation_data.action:
@@ -193,30 +221,29 @@ for i in range(n_total):
     # Dense grain core for this frame.
     core_pos   = _grain_core(csv_path, CORE_GRAIN_FRACTION)
 
-    # Earth position relative to Apophis CoM (from the Earth Empty's keyframe).
-    earth_pos  = earth_empty.matrix_world.translation.copy()
+    if _use_earth_track:
+        # Earth position relative to Apophis CoM (from the Earth Empty's keyframe).
+        earth_pos  = earth_empty.matrix_world.translation.copy()
 
-    # Direction from grain core to Earth.
-    earth_vec        = earth_pos - core_pos
-    earth_dist_core  = earth_vec.length
-    if earth_dist_core > 1e-6:
-        earth_from_core = earth_vec / earth_dist_core
+        # Direction from grain core to Earth.
+        earth_vec        = earth_pos - core_pos
+        earth_dist_core  = earth_vec.length
+        if earth_dist_core > 1e-6:
+            earth_from_core = earth_vec / earth_dist_core
+        else:
+            earth_from_core = _X.copy()
+
+        # Perpendicular offset direction in the ecliptic plane (cross with world Z).
+        offset_dir = earth_from_core.cross(_Z)
+        if offset_dir.length < 1e-4:
+            offset_dir = earth_from_core.cross(_X)
+        if offset_dir.length < 1e-4:
+            offset_dir = Vector((0.0, 1.0, 0.0))
+        offset_dir.normalize()
+
+        cam_pos  = core_pos + (-earth_from_core * cos_a + offset_dir * sin_a) * CAM_DIST_BU
     else:
-        earth_from_core = _X.copy()
-
-    # Perpendicular offset direction in the ecliptic plane (cross with world Z).
-    # Stays continuous as earth_from_core sweeps; Earth never approaches ±Z so
-    # no singularity.
-    offset_dir = earth_from_core.cross(_Z)
-    if offset_dir.length < 1e-4:
-        offset_dir = earth_from_core.cross(_X)
-    if offset_dir.length < 1e-4:
-        offset_dir = Vector((0.0, 1.0, 0.0))
-    offset_dir.normalize()
-
-    # Camera: CAM_DIST_BU from the grain core, nudged CAM_ANGLE_DEG toward the
-    # perpendicular so Earth appears that many degrees off-centre.
-    cam_pos  = core_pos + (-earth_from_core * cos_a + offset_dir * sin_a) * CAM_DIST_BU
+        cam_pos = core_pos + _grain_only_offset * CAM_DIST_BU
 
     # Aim at the grain core — dense nucleus always centred in frame.
     look_vec = (core_pos - cam_pos).normalized()
@@ -262,9 +289,12 @@ if SETUP_CAM_FILL_LIGHT:
 
 print(
     f'\nDone. "{CAMERA_NAME}" is now the active scene camera.\n'
-    f'  Tracks grain core (80% closest grains) — nucleus always centred.\n'
-    f'  CAM_DIST_BU={CAM_DIST_BU}  CAM_ANGLE_DEG={CAM_ANGLE_DEG}  '
-    f'FOV={CAMERA_FOV_DEG}°\n'
+    f'  Mode: {"Earth-tracking" if _use_earth_track else "grain-only orbit"}.\n'
+    f'  Tracks grain core ({int(CORE_GRAIN_FRACTION * 100)}% closest grains) — nucleus always centred.\n'
+    f'  CAM_DIST_BU={CAM_DIST_BU}  '
+    + (f'CAM_ANGLE_DEG={CAM_ANGLE_DEG}  ' if _use_earth_track else
+       f'az={CAM_GRAIN_ONLY_AZIMUTH_DEG}° el={CAM_GRAIN_ONLY_ELEVATION_DEG}°  ')
+    + f'FOV={CAMERA_FOV_DEG}°\n'
     f'  Location: {LOCATION_INTERP}  Rotation: {ROTATION_INTERP} (SLERP, no roll)\n'
     f'  clip [{CAM_CLIP_START}, {CAM_CLIP_END}] BU'
 )

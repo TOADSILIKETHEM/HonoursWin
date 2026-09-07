@@ -5,29 +5,35 @@ import pandas as pd
 import numpy as np
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-INPUT_DIR    = "//wsl.localhost/Ubuntu/home/mboyle/Honours/sobol_mass_runs/sobol_20260607_122950_torque_align_obj_fine_dt_p155_np1000/run_0001"
+INPUT_DIR    = "/home/mboyle/Honours/sobol_mass_runs/sobol_20260629_132547_blender_vis_earth_aligned_np500/run_0001"
 DUMP_PATTERN = "sobol_[0-9]*"
 
-# Root folder for all DEM CSV output.  Subfolders are created automatically
-# based on the INPUT_DIR name, so changing INPUT_DIR above is all you need to do.
-BASE_OUTPUT_DIR = r"c:\Users\22boy\OneDrive\Documents\GC-Max_desktop\Honours\Code\DEMCSVs\torque_align_obj_fine_dt"
+# Root folder for all DEM CSV output.
+# Subfolders are created automatically:
+#   DEMCSVs\<sim_name>\<run_name>_bodies_output\
+#   DEMCSVs\<sim_name>\<run_name>_grains_output\
+# where <sim_name> is the simulation folder (parent of INPUT_DIR) and
+# <run_name> is the last component of INPUT_DIR (e.g. run_0001).
+BASE_OUTPUT_DIR = "/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs"
 
-_sim_name         = os.path.basename(INPUT_DIR.rstrip('/'))
-BODIES_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, f"{_sim_name}_bodies_output")
-GRAINS_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, f"{_sim_name}_grains_output")
+_run_name         = os.path.basename(INPUT_DIR.rstrip('/'))
+_sim_name         = os.path.basename(os.path.dirname(INPUT_DIR.rstrip('/')))
+BODIES_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, _sim_name, f"{_run_name}_bodies_output")
+GRAINS_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, _sim_name, f"{_run_name}_grains_output")
 
-# The first N_BODIES sinks are solar system bodies in this order.
-# Matches PHANTOM's solarsystem setup sink order.
-N_BODIES = 10
+# The first N_BODIES sinks are solar system bodies in this order when
+# apophis_only=F (full solarsystem setup).  When apophis_only=T, N_BODIES=0.
+# Auto-detected per dump from sink Reff layout; override here only if needed.
+N_BODIES = None  # None = auto-detect; int = force (legacy/debug)
 BODY_NAMES = [
     "Sun", "Mercury", "Venus", "Earth", "Moon",
     "Mars", "Jupiter", "Saturn", "Uranus", "Neptune",
 ]
 
-# Sinks with Reff (in km, after unit conversion) below this threshold are
+# Sinks with h or Reff (in km, after unit conversion) below this threshold are
 # treated as DEM grains rather than solar system bodies.  Grain Reff ~0.05 km;
 # smallest real body (Moon) is ~1737 km — so 1 km cleanly divides them.
-# Used only as a sanity-check; N_BODIES is the primary classifier.
+# Macro bodies store radius in h; Reff is 0 for planets and >0 for DEM grains.
 GRAIN_REFF_THRESHOLD_KM = 1.0
 
 # Visual scale for the DEM grain body-frame positions written to the CSV.
@@ -59,11 +65,74 @@ GRAIN_VIS_SCALE = 50.0
 #               the DEM grain block is incomplete and unusable.
 # Dumps with fewer than MIN_DEM_GRAINS DEM particles are treated as mini
 # dumps and skipped.  Set to just below np_apophis (64).
-MIN_DEM_GRAINS = 450   # this run uses np_apophis=500; set ~450 to skip mini-dumps
+MIN_DEM_GRAINS = None   # None = derive from np_apophis in sobol.setup; int = override
 # ─────────────────────────────────────────────────────────────────────────────
 
 AU_IN_CM = 1.495978707e13
 KM_IN_CM = 1.0e5
+
+
+def _parse_setup_flags(input_dir):
+    """Read apophis_only, np_apophis, use_dem from sobol.setup if present."""
+    setup_path = os.path.join(input_dir, "sobol.setup")
+    apophis_only = None
+    np_apophis = None
+    use_dem = None
+    if not os.path.isfile(setup_path):
+        return apophis_only, np_apophis, use_dem
+    with open(setup_path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            stripped = line.split("!", 1)[0].strip()
+            if not stripped or "=" not in stripped:
+                continue
+            key, _, val = stripped.partition("=")
+            key = key.strip().lower()
+            val = val.strip()
+            if not val:
+                continue
+            if key == "apophis_only":
+                apophis_only = val.upper().startswith("T")
+            elif key == "np_apophis":
+                np_apophis = int(float(val))
+            elif key == "use_dem":
+                use_dem = val.upper().startswith("T")
+    return apophis_only, np_apophis, use_dem
+
+
+def _detect_n_bodies(sdf_sinks, to_km, setup_apophis_only=None):
+    """Return number of solar-system body sinks before the DEM grain block."""
+    if setup_apophis_only is True:
+        return 0
+
+    reff_km = sdf_sinks["Reff"].values * to_km
+    h_km = sdf_sinks["h"].values * to_km
+
+    # DEM grains always have Reff populated; macro bodies use h and Reff=0.
+    is_grain = reff_km > 0.0
+    if is_grain.any():
+        return int(np.argmax(is_grain))
+
+    # No DEM grains: count macro bodies by h (planets), or none for grain-only setups.
+    return int(np.sum(h_km >= GRAIN_REFF_THRESHOLD_KM))
+
+
+_SETUP_APOPHIS_ONLY, _SETUP_NP_APOPHIS, _SETUP_USE_DEM = _parse_setup_flags(INPUT_DIR)
+if _SETUP_NP_APOPHIS is not None:
+    _MIN_DEM_AUTO = max(10, _SETUP_NP_APOPHIS - max(50, _SETUP_NP_APOPHIS // 10))
+else:
+    _MIN_DEM_AUTO = 450
+if MIN_DEM_GRAINS is None:
+    MIN_DEM_GRAINS = _MIN_DEM_AUTO
+
+_n_bodies_mode = "auto" if N_BODIES is None else str(N_BODIES)
+print(
+    f"DEMtoCSV: {_sim_name}/{_run_name}\n"
+    f"  setup: apophis_only={_SETUP_APOPHIS_ONLY}, np_apophis={_SETUP_NP_APOPHIS}, "
+    f"use_dem={_SETUP_USE_DEM}\n"
+    f"  MIN_DEM_GRAINS={MIN_DEM_GRAINS}, N_BODIES={_n_bodies_mode}\n"
+    f"  bodies → {BODIES_OUTPUT_DIR}\n"
+    f"  grains → {GRAINS_OUTPUT_DIR}\n"
+)
 
 os.makedirs(BODIES_OUTPUT_DIR, exist_ok=True)
 os.makedirs(GRAINS_OUTPUT_DIR, exist_ok=True)
@@ -99,49 +168,79 @@ for dump in dump_files:
         to_au    = udist / AU_IN_CM   # code unit → AU
 
         n_sinks  = len(sdf_sinks)
-        n_dem    = n_sinks - N_BODIES   # number of DEM grains (should be 64)
+        n_bodies = (
+            int(N_BODIES)
+            if N_BODIES is not None
+            else _detect_n_bodies(sdf_sinks, to_km, _SETUP_APOPHIS_ONLY)
+        )
+        n_dem    = n_sinks - n_bodies
+
+        if _SETUP_USE_DEM is False:
+            print(f"  [{os.path.basename(dump)}] use_dem=F in setup — no DEM grains, skipped")
+            continue
+        if _SETUP_NP_APOPHIS is not None and _SETUP_NP_APOPHIS <= 1:
+            print(
+                f"  [{os.path.basename(dump)}] np_apophis={_SETUP_NP_APOPHIS} "
+                f"(single sink, not DEM lattice) — skipped"
+            )
+            continue
 
         if n_dem < MIN_DEM_GRAINS:
             print(f"  [{os.path.basename(dump)}] mini dump ({n_sinks} sinks, {n_dem} DEM grains) — skipped")
             continue
 
-        # Sanity check: confirm the split looks right via Reff threshold
-        reff_bodies = sdf_sinks["Reff"].iloc[:N_BODIES].values * to_km
-        reff_grains = sdf_sinks["Reff"].iloc[N_BODIES:].values * to_km
-        if reff_bodies.min() < GRAIN_REFF_THRESHOLD_KM:
-            print(
-                f"  WARNING [{dump}]: some 'body' sink has Reff "
-                f"{reff_bodies.min():.4f} km < threshold {GRAIN_REFF_THRESHOLD_KM} km. "
-                f"Check N_BODIES."
+        # Sanity check: macro bodies use h; DEM grains use Reff.
+        if n_bodies > 0:
+            h_bodies = sdf_sinks["h"].iloc[:n_bodies].values * to_km
+            if h_bodies.min() < GRAIN_REFF_THRESHOLD_KM:
+                print(
+                    f"  WARNING [{dump}]: some 'body' sink has h "
+                    f"{h_bodies.min():.4f} km < threshold {GRAIN_REFF_THRESHOLD_KM} km. "
+                    f"Check N_BODIES (detected {n_bodies})."
+                )
+        if n_dem > 0:
+            reff_grains = sdf_sinks["Reff"].iloc[n_bodies:].values * to_km
+            if reff_grains.max() > GRAIN_REFF_THRESHOLD_KM:
+                print(
+                    f"  WARNING [{dump}]: some 'grain' sink has Reff "
+                    f"{reff_grains.max():.4f} km > threshold {GRAIN_REFF_THRESHOLD_KM} km. "
+                    f"Check N_BODIES (detected {n_bodies})."
+                )
+
+        # ── Solar system bodies (rows 0 … n_bodies-1) ────────────────────────
+        if n_bodies > 0:
+            b = sdf_sinks.iloc[:n_bodies]
+            bodies_df = pd.DataFrame({
+                "name":   BODY_NAMES[: len(b)],
+                "time_s": time_s,
+                "x_au":   b["x"].values * to_au,
+                "y_au":   b["y"].values * to_au,
+                "z_au":   b["z"].values * to_au,
+                "x_km":   b["x"].values * to_km,
+                "y_km":   b["y"].values * to_km,
+                "z_km":   b["z"].values * to_km,
+                # For solar system bodies PHANTOM stores the physical radius in h;
+                # Reff is 0 for macro bodies and only populated for DEM grains.
+                "h":      b["h"].values * to_km,    # physical radius (km) for bodies
+                "Reff":   b["h"].values * to_km,    # alias so Blender scripts can use Reff column
+                "m":      b["m"].values,
+            })
+        else:
+            bodies_df = pd.DataFrame(
+                columns=["name", "time_s", "x_au", "y_au", "z_au",
+                         "x_km", "y_km", "z_km", "h", "Reff", "m"]
             )
-        if reff_grains.max() > GRAIN_REFF_THRESHOLD_KM:
-            print(
-                f"  WARNING [{dump}]: some 'grain' sink has Reff "
-                f"{reff_grains.max():.4f} km > threshold {GRAIN_REFF_THRESHOLD_KM} km. "
-                f"Check N_BODIES."
-            )
+            if _SETUP_APOPHIS_ONLY:
+                print(
+                    f"  [{os.path.basename(dump)}] apophis_only=T: "
+                    f"bodies CSV = synthetic Apophis only (no Earth/Sun for Blender)"
+                )
 
-        # ── Solar system bodies (rows 0 … N_BODIES-1) ────────────────────────
-        b = sdf_sinks.iloc[:N_BODIES]
-
-        bodies_df = pd.DataFrame({
-            "name":   BODY_NAMES[: len(b)],
-            "time_s": time_s,
-            "x_au":   b["x"].values * to_au,
-            "y_au":   b["y"].values * to_au,
-            "z_au":   b["z"].values * to_au,
-            "x_km":   b["x"].values * to_km,
-            "y_km":   b["y"].values * to_km,
-            "z_km":   b["z"].values * to_km,
-            # For solar system bodies PHANTOM stores the physical radius in h;
-            # Reff is 0 for macro bodies and only populated for DEM grains.
-            "h":      b["h"].values * to_km,    # physical radius (km) for bodies
-            "Reff":   b["h"].values * to_km,    # alias so Blender scripts can use Reff column
-            "m":      b["m"].values,
-        })
-
-        # ── DEM grains (rows N_BODIES … end) ─────────────────────────────────
-        g = sdf_sinks.iloc[N_BODIES:]
+        # ── DEM grains (rows n_bodies … end) ─────────────────────────────────
+        g = sdf_sinks.iloc[n_bodies:]
+        if len(g) == 0:
+            print(f"  [{os.path.basename(dump)}] no DEM grains after body split — skipped")
+            continue
 
         total_mass = g["m"].sum()
         com_x = (g["x"] * g["m"]).sum() / total_mass
@@ -230,7 +329,7 @@ for dump in dump_files:
         )) * GRAIN_VIS_SCALE
         print(
             f"  [{basename}]  {n_sinks} sinks "
-            f"({N_BODIES} bodies + {n_dem} DEM grains)  t={time_val}\n"
+            f"({n_bodies} bodies + {n_dem} DEM grains)  t={time_val}\n"
             f"    Apophis CoM: "
             f"({com_x*to_au:.6f}, {com_y*to_au:.6f}, {com_z*to_au:.6f}) AU\n"
             f"    Mean grain Reff: {mean_reff:.4f} km "
