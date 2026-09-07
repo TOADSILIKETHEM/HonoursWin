@@ -22,6 +22,11 @@ BlenderConvert/*
 CSVconvert/*
 !CSVconvert/*.py
 
+# --- viz (bulk DEM preprocess) ---
+!viz/
+viz/*
+!viz/*.py
+
 # --- Rcode ---
 !Rcode/
 Rcode/*
