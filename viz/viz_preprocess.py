@@ -180,7 +180,7 @@ def run_preprocess(
     grain_files = sorted(glob.glob(str(grains_dir / "*.npz")))
     if not grain_files:
         raise FileNotFoundError(
-            f"No grain npz files in {grains_dir} (CSV-era folder? re-run DEMtoCSV.py)"
+            f"No grain npz files in {grains_dir} (CSV-era folder? re-run DEMDumpConvert.py)"
         )
 
     if run_name is None:
@@ -266,7 +266,7 @@ def run_preprocess(
         "envelope_method": envelope_method,
         "input_mode": "npz",
         "bodies_csv_dir": rel_bodies,
-        "grains_csv_dir": rel_grains,
+        "grains_dir": rel_grains,
         "ejecta_subsampled": any_subsample,
     }
     manifest_path = output_dir / "manifest.json"
@@ -298,7 +298,7 @@ def main() -> int:
         "--input-mode",
         choices=("npz", "dump"),
         default="npz",
-        help="npz = DEMtoCSV.py grain files; dump mode reserved for P4 (not implemented yet)",
+        help="npz = DEMDumpConvert.py grain files; dump mode reserved for P4 (not implemented yet)",
     )
     p.add_argument("--dump-dir", type=Path, default=None)
     args = p.parse_args()

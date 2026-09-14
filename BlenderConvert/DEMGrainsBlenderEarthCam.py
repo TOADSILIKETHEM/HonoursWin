@@ -17,8 +17,8 @@ from typing import Optional
 from mathutils import Matrix, Vector
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-# Paths from DEMtoCSV.py → DEMCSVs/<sim_name>/run_XXXX_grains_output|_bodies_output/
-GRAINS_CSV_DIR = (
+# Paths from DEMDumpConvert.py → DEMCSVs/<sim_name>/run_XXXX_grains_output|_bodies_output/
+GRAINS_DIR = (
     'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/'
     'sobol_20260705_131545_baseline_58deg/run_0001_grains_output/'
 )
@@ -107,18 +107,18 @@ CAM_FILL_LIGHT_TYPE   = 'POINT'   # POINT, SPOT, AREA, or SUN
 CAM_FILL_LIGHT_ENERGY = 20000.0
 # ─────────────────────────────────────────────────────────────────────────────
 # COORDINATE NOTE
-# Grains: x_vis = x_rel_km × GRAIN_VIS_SCALE (DEMtoCSV.py, default 50).
+# Grains: x_vis = x_rel_km × GRAIN_VIS_SCALE (DEMDumpConvert.py, default 50).
 # Earth:  (earth_km - apophis_km) × EARTH_VIS_SCALE.
 # Sun lamp: −Z aligned with light from Sun (−normalised sun_km − apo_km).
 # Camera: tracks dense grain core; uses Earth Empty keyframes for framing.
 # ─────────────────────────────────────────────────────────────────────────────
 
-grain_files = sorted(glob.glob(os.path.join(GRAINS_CSV_DIR, '*.npz')))
+grain_files = sorted(glob.glob(os.path.join(GRAINS_DIR, '*.npz')))
 
 if not grain_files:
     raise FileNotFoundError(
-        f'No grain npz files found in {GRAINS_CSV_DIR}\n'
-        'Run CSVconvert/DEMtoCSV.py first (CSV-era grain folders must be reconverted).'
+        f'No grain npz files found in {GRAINS_DIR}\n'
+        'Run CSVconvert/DEMDumpConvert.py first (CSV-era grain folders must be reconverted).'
     )
 
 print(f'Found {len(grain_files)} grain npz file(s).')
@@ -934,5 +934,5 @@ else:
 
 print(
     '\nAll done. Do NOT run Viewport.py (tuned for point-mass scale).\n'
-    'Tune paths at top: GRAINS_CSV_DIR, BODIES_CSV_DIR, camera block, SETUP_CAMERA.'
+    'Tune paths at top: GRAINS_DIR, BODIES_CSV_DIR, camera block, SETUP_CAMERA.'
 )

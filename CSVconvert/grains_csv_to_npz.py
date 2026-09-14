@@ -1,6 +1,6 @@
 """One-off upgrade: write a same-stem .npz next to each CSV-era grain CSV.
 
-CSVs are never modified or deleted. Matches the 24-key schema DEMtoCSV.py
+CSVs are never modified or deleted. Matches the 24-key schema DEMDumpConvert.py
 writes (grain_id int64; time_s float64 scalar; everything else float64,
 shape (n,)). Old CSVs may predate a column -- that key is NaN-filled and
 noted per folder.
@@ -21,7 +21,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-# Schema order must match DEMtoCSV.py's `grains = {...}` dict exactly.
+# Schema order must match DEMDumpConvert.py's `grains = {...}` dict exactly.
 KEYS = [
     "grain_id", "time_s", "x_au", "y_au", "z_au", "x_km", "y_km", "z_km",
     "x_rel_km", "y_rel_km", "z_rel_km", "Reff_km", "h_km",

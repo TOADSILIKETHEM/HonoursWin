@@ -79,7 +79,7 @@ def _resolve_bodies_dir(manifest, viz_dir):
 
 
 def _resolve_grains_dir(manifest, viz_dir):
-    rel = manifest.get('grains_csv_dir', '')
+    rel = manifest.get('grains_dir', '')
     return os.path.normpath(os.path.join(viz_dir, rel))
 
 
@@ -284,7 +284,7 @@ def main():
     grain_files = sorted(glob.glob(os.path.join(grains_dir, '*.npz')))
     if SETUP_CAMERA and not grain_files:
         print(f'WARNING: no grain npz files in {grains_dir}; tracking camera skipped '
-              '(CSV-era folder? re-run DEMtoCSV.py).')
+              '(CSV-era folder? re-run DEMDumpConvert.py).')
 
     has_solar = (
         bool(IMPORT_SOLAR_SYSTEM)

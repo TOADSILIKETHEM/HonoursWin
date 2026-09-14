@@ -26,8 +26,8 @@ CAM_ANGLE_DEG      = 30.0
 # Name of the Earth Empty created by DEMGrainsBlenderEarth.py.
 EARTH_EMPTY_NAME   = 'Earth'
 
-# Path to the grain npz folder — MUST match GRAINS_CSV_DIR in DEMGrainsBlenderEarth.py.
-GRAIN_CSV_DIR = (
+# Path to the grain npz folder — MUST match GRAINS_DIR in DEMGrainsBlenderEarth.py.
+GRAIN_DIR = (
     'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/'
     'sobol_20260705_131545_baseline_58deg/run_0001_grains_output/'
 )
@@ -110,14 +110,14 @@ else:
     )
 
 # ── Load grain npz files (sorted, same order as DEMGrainsBlenderEarth.py) ────
-grain_files = sorted(glob.glob(os.path.join(GRAIN_CSV_DIR, '*.npz')))
+grain_files = sorted(glob.glob(os.path.join(GRAIN_DIR, '*.npz')))
 if not grain_files:
     raise RuntimeError(
-        f'No grain npz files found in {GRAIN_CSV_DIR}\n'
-        'Set GRAIN_CSV_DIR to match GRAINS_CSV_DIR in DEMGrainsBlenderEarth.py '
-        '(CSV-era grain folders must be reconverted with DEMtoCSV.py).'
+        f'No grain npz files found in {GRAIN_DIR}\n'
+        'Set GRAIN_DIR to match GRAINS_DIR in DEMGrainsBlenderEarth.py '
+        '(CSV-era grain folders must be reconverted with DEMDumpConvert.py).'
     )
-print(f'Found {len(grain_files)} grain npz file(s) in {GRAIN_CSV_DIR}')
+print(f'Found {len(grain_files)} grain npz file(s) in {GRAIN_DIR}')
 
 
 def _grain_core(grain_path, fraction):

@@ -62,7 +62,7 @@ def reference_scale_from_run(grains_dir):
     files = sorted(glob.glob(str(grains_dir / '*.npz')))
     if not files:
         raise FileNotFoundError(
-            f'No grain npz files in {grains_dir} (CSV-era folder? re-run DEMtoCSV.py)'
+            f'No grain npz files in {grains_dir} (CSV-era folder? re-run DEMDumpConvert.py)'
         )
     d = np.load(files[0])
     for key in ('x_vis', 'y_vis', 'z_vis', 'Reff_vis'):

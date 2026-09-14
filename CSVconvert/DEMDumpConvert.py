@@ -127,7 +127,7 @@ if MIN_DEM_GRAINS is None:
 
 _n_bodies_mode = "auto" if N_BODIES is None else str(N_BODIES)
 print(
-    f"DEMtoCSV: {_sim_name}/{_run_name}\n"
+    f"DEMDumpConvert: {_sim_name}/{_run_name}\n"
     f"  setup: apophis_only={_SETUP_APOPHIS_ONLY}, np_apophis={_SETUP_NP_APOPHIS}, "
     f"use_dem={_SETUP_USE_DEM}\n"
     f"  MIN_DEM_GRAINS={MIN_DEM_GRAINS}, N_BODIES={_n_bodies_mode}\n"
