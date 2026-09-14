@@ -16,6 +16,7 @@ are new here.
 import argparse
 import re
 import sys
+import traceback
 from pathlib import Path
 
 import bpy
@@ -70,9 +71,10 @@ def main() -> None:
     grains_dir = str(Path(args.grains_dir).resolve()).replace("\\", "/") + "/"
     bodies_dir = str(Path(args.bodies_dir).resolve()).replace("\\", "/") + "/"
     # Resolve output-dir to an absolute path *before* exec'ing the DEM
-    # script below -- DEMGrainsBlenderEarthCam.py appends TheEarth1.blend
-    # (bpy.ops.wm.append), which as a side effect changes Blender's process
-    # working directory to that .blend's folder. A relative output-dir
+    # script below -- DEMGrainsBlenderEarthCam.py loads TheEarth1.blend via
+    # bpy.data.libraries.load(blend_path, link=False) (its line 558), which
+    # as a side effect changes Blender's process working directory to that
+    # .blend's folder. A relative output-dir
     # resolved (or mkdir'd) after that point silently lands under the wrong
     # directory instead of the caller's cwd -- confirmed live: PNGs wrote to
     # "C:\DEMCSVs\..." instead of the repo's "DEMCSVs\..." until this was
@@ -107,4 +109,20 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Under `--background --python`, Blender exits 0 even when this script
+    # raises an uncaught exception (verified live: a bare `raise` here still
+    # produced a "Blender quit" / exit code 0 process, unless
+    # --python-exit-code is passed by the caller). The CLI contract promises
+    # "Exit code 0 on success, non-zero on failure" regardless of what flags
+    # the caller passes, so failure must be turned into a nonzero exit
+    # explicitly rather than relying on Blender's own uncaught-exception
+    # handling. sys.exit(1) was verified live to set the process's exit code
+    # correctly in 5.2.1 (a plain `sys.exit(1)` --python script returned
+    # exit code 1), so no os._exit() fallback is needed here.
+    try:
+        main()
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.exit(1)
