@@ -40,16 +40,16 @@ def fof_cluster_labels(b_pos: np.ndarray, link_factor: float) -> np.ndarray:
         return np.zeros(n, dtype=np.int32)
 
     tree = cKDTree(b_pos)
-    dists, _ = tree.query(b_pos, k=2)
+    dists, _ = tree.query(b_pos, k=2, workers=-1)
     nn_dist = dists[:, 1]
     link_length = link_factor * float(np.median(nn_dist))
 
-    pairs = list(tree.query_pairs(link_length))
-    if not pairs:
+    pairs = tree.query_pairs(link_length, output_type="ndarray")
+    if len(pairs) == 0:
         return np.arange(n, dtype=np.int32)
 
-    rows = [i for i, j in pairs] + [j for i, j in pairs]
-    cols = [j for i, j in pairs] + [i for i, j in pairs]
+    rows = np.concatenate((pairs[:, 0], pairs[:, 1]))
+    cols = np.concatenate((pairs[:, 1], pairs[:, 0]))
     data = np.ones(len(rows), dtype=np.uint8)
     graph = csr_matrix((data, (rows, cols)), shape=(n, n))
     _, labels = connected_components(graph, directed=False)
@@ -145,7 +145,12 @@ def high_energy_mask_in_cluster(
     vel: np.ndarray,
     cluster_mask: np.ndarray,
 ) -> np.ndarray:
-    """Grains in cluster with positive specific energy in the cluster CoM frame."""
+    """Grains in cluster with positive specific energy in the cluster CoM frame.
+
+    ``eps = 0.5 v^2 - G M / r`` with G = 1, so ``pos``, ``mass`` and ``vel``
+    must all be in PHANTOM code units. For these runs udist = 1 km, so the
+    ``*_rel_km`` columns are already code units.
+    """
     out = np.zeros(len(pos), dtype=bool)
     if not cluster_mask.any():
         return out
@@ -176,13 +181,18 @@ def unbound_mass_main_body(
     mass: np.ndarray,
     vel: np.ndarray,
     *,
-    main_body_mask: Optional[np.ndarray] = None,
+    main_mask: Optional[np.ndarray] = None,
 ) -> float:
-    """Mass not on the main fragment (matches WSL analysis)."""
+    """Mass not on the main fragment (matches WSL analysis).
+
+    ``pos``, ``mass`` and ``vel`` must all be in PHANTOM code units (G = 1) —
+    for these runs udist = 1 km, so the ``*_rel_km`` columns are already code
+    units and need no conversion.
+    """
     m_tot = float(mass.sum())
     if m_tot <= 0.0:
         return 0.0
-    mb = main_body_mask if main_body_mask is not None else main_body_mask_fof_adaptive(pos, mass)
+    mb = main_mask if main_mask is not None else main_body_mask_fof_adaptive(pos, mass)
     unbound = float(mass[~mb].sum())
     m_main = float(mass[mb].sum())
     if m_main <= 0.0:

@@ -1,6 +1,7 @@
 import bpy
 import math
 import mathutils
+import numpy as np
 import pandas as pd
 import glob
 import os
@@ -145,15 +146,15 @@ VOLUMETRIC_TILE_PX = '2'      # screen-space froxel tile size (finer = less bloc
 # Sun lamp: rotation only (from normalised Sun–Apophis km vector).
 # ─────────────────────────────────────────────────────────────────────────────
 
-csv_files = sorted(glob.glob(os.path.join(GRAINS_CSV_DIR, '*.csv')))
+grain_files = sorted(glob.glob(os.path.join(GRAINS_CSV_DIR, '*.npz')))
 
-if not csv_files:
+if not grain_files:
     raise FileNotFoundError(
-        f'No CSVs found in {GRAINS_CSV_DIR}\n'
-        'Run CSVconvert/DEMtoCSV.py first to generate dem_grains_output/.'
+        f'No grain npz files found in {GRAINS_CSV_DIR}\n'
+        'Run CSVconvert/DEMtoCSV.py first (CSV-era grain folders must be reconverted).'
     )
 
-print(f'Found {len(csv_files)} grain CSV(s).')
+print(f'Found {len(grain_files)} grain npz file(s).')
 
 _bodies_available = bool(BODIES_CSV_DIR) and os.path.isdir(BODIES_CSV_DIR)
 if BODIES_CSV_DIR and not _bodies_available:
@@ -164,10 +165,11 @@ if BODIES_CSV_DIR and not _bodies_available:
 
 
 def _bodies_csv_for(grains_path):
-    """Return the matching bodies CSV path, or None if it does not exist."""
+    """Return the bodies CSV sharing the grain file's stem, or None if it does not exist."""
     if not _bodies_available:
         return None
-    p = os.path.join(BODIES_CSV_DIR, os.path.basename(grains_path))
+    stem = os.path.splitext(os.path.basename(grains_path))[0]
+    p = os.path.join(BODIES_CSV_DIR, stem + '.csv')
     return p if os.path.exists(p) else None
 
 
@@ -186,7 +188,7 @@ def _detect_solar_system_bodies(grain_files):
 _has_solar_system = (
     bool(IMPORT_SOLAR_SYSTEM)
     if IMPORT_SOLAR_SYSTEM is not None
-    else _detect_solar_system_bodies(csv_files)
+    else _detect_solar_system_bodies(grain_files)
 )
 print(
     f'Run mode: {"full solar system" if _has_solar_system else "apophis_only (grains only)"}.'
@@ -637,18 +639,17 @@ if grain_col is None:
     bpy.context.scene.collection.children.link(grain_col)
 
 # ── First pass: read frame 1 and create one sphere per grain ──────────────────
-first_df = pd.read_csv(csv_files[0])
-n_grains = len(first_df)
-print(f'Creating {n_grains} grain spheres from {os.path.basename(csv_files[0])} ...')
+first = np.load(grain_files[0])
+n_grains = len(first['grain_id'])
+print(f'Creating {n_grains} grain spheres from {os.path.basename(grain_files[0])} ...')
 
-for _, row in first_df.iterrows():
-    gid    = int(row['grain_id'])
-    name   = f'DEM_Grain_{gid:03d}'
-    radius = float(row['Reff_vis'])
-    loc    = (float(row['x_vis']), float(row['y_vis']), float(row['z_vis']))
+for gid, radius, x, y, z in zip(first['grain_id'], first['Reff_vis'],
+                                first['x_vis'], first['y_vis'], first['z_vis']):
+    name = f'DEM_Grain_{int(gid):03d}'
 
     bpy.ops.mesh.primitive_uv_sphere_add(
-        radius=radius, segments=12, ring_count=8, location=loc
+        radius=float(radius), segments=12, ring_count=8,
+        location=(float(x), float(y), float(z)),
     )
     obj      = bpy.context.object
     obj.name = name
@@ -665,32 +666,26 @@ for _, row in first_df.iterrows():
 print('Spheres created.')
 
 # ── Second pass: keyframe grain positions, Sun lamp rotation, Earth position ──
-print(f'Keyframing {len(csv_files)} frames ...')
+print(f'Keyframing {len(grain_files)} frames ...')
 
 bpy.context.scene.frame_start = 1
-bpy.context.scene.frame_end   = len(csv_files)
+bpy.context.scene.frame_end   = len(grain_files)
 
-for frame_num, csv_file in enumerate(csv_files, start=1):
-    df = pd.read_csv(csv_file)
+for frame_num, grain_file in enumerate(grain_files, start=1):
+    d = np.load(grain_file)
     bpy.context.scene.frame_set(frame_num)
 
     # Grain positions.
-    for _, row in df.iterrows():
-        gid  = int(row['grain_id'])
-        name = f'DEM_Grain_{gid:03d}'
-        obj  = bpy.data.objects.get(name)
+    for gid, x, y, z in zip(d['grain_id'], d['x_vis'], d['y_vis'], d['z_vis']):
+        obj = bpy.data.objects.get(f'DEM_Grain_{int(gid):03d}')
         if obj is None:
             continue
-        obj.location = (
-            float(row['x_vis']),
-            float(row['y_vis']),
-            float(row['z_vis']),
-        )
+        obj.location = (float(x), float(y), float(z))
         obj.keyframe_insert(data_path='location', frame=frame_num)
 
     # Solar-system extras need the bodies CSV — read once per frame.
     if _has_solar_system and (sun_lamp_obj is not None or earth_empty is not None):
-        bodies_path = _bodies_csv_for(csv_file)
+        bodies_path = _bodies_csv_for(grain_file)
         if bodies_path:
             bdf     = pd.read_csv(bodies_path)
             sun_row = bdf.loc[bdf['name'] == 'Sun']
@@ -813,7 +808,7 @@ if _ee is not None:
 
 if _has_solar_system:
     print(
-        f'Done — {n_grains} DEM grains animated over {len(csv_files)} frame(s).\n'
+        f'Done — {n_grains} DEM grains animated over {len(grain_files)} frame(s).\n'
         'Positions are in Apophis body frame (Apophis at world origin).\n'
         f'Earth Empty "Earth" is at (earth_km - apophis_km) × {EARTH_VIS_SCALE} BU/km '
         f'(~7600 BU at closest approach; scale_factor ≈ 1.0 → native size, atmosphere preserved).\n'
@@ -827,7 +822,7 @@ if _has_solar_system:
     )
 else:
     print(
-        f'Done — {n_grains} DEM grains animated over {len(csv_files)} frame(s).\n'
+        f'Done — {n_grains} DEM grains animated over {len(grain_files)} frame(s).\n'
         'apophis_only run: grains in body frame (Apophis CoM at origin); no Earth/Sun/Moon.\n'
         'Sun lamp uses fixed direction — adjust APOPHIS_ONLY_SUN_DIRECTION if needed.\n'
         'For camera framing on grain-only runs, use DEMCamera.py grain-only mode.'

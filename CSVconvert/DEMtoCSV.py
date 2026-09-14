@@ -8,10 +8,10 @@ import numpy as np
 INPUT_DIR    = "/home/mboyle/Honours/sobol_mass_runs/sobol_20260629_132547_blender_vis_earth_aligned_np500/run_0001"
 DUMP_PATTERN = "sobol_[0-9]*"
 
-# Root folder for all DEM CSV output.
+# Root folder for all DEM output (bodies as CSV, grains as .npz).
 # Subfolders are created automatically:
-#   DEMCSVs\<sim_name>\<run_name>_bodies_output\
-#   DEMCSVs\<sim_name>\<run_name>_grains_output\
+#   DEMCSVs\<sim_name>\<run_name>_bodies_output\   one <dump>.csv per dump
+#   DEMCSVs\<sim_name>\<run_name>_grains_output\   one <dump>.npz per dump
 # where <sim_name> is the simulation folder (parent of INPUT_DIR) and
 # <run_name> is the last component of INPUT_DIR (e.g. run_0001).
 BASE_OUTPUT_DIR = "/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs"
@@ -36,20 +36,21 @@ BODY_NAMES = [
 # Macro bodies store radius in h; Reff is 0 for planets and >0 for DEM grains.
 GRAIN_REFF_THRESHOLD_KM = 1.0
 
-# Visual scale for the DEM grain body-frame positions written to the CSV.
+# Visual scale for the DEM grain body-frame positions written to the grains npz.
 # WHY THIS IS NECESSARY
 # ─────────────────────
 # Apophis is ~0.35 AU from Earth during the flyby.  At the solar-system
 # SCALE=5000 used by the Blender scripts, that places it at ~1750 Blender
 # units (BU) from the origin.  Float32 epsilon at 1750 BU is ~2e-4 BU, but
 # the grain-to-grain separation is only ~5e-6 BU — so every grain collapses
-# to exactly the same Blender coordinate.  The x_au columns in the CSV also
-# cannot distinguish grains: all 64 print as the same value to 6 d.p.
+# to exactly the same Blender coordinate.  The x_au values in the grains npz
+# also cannot distinguish grains: all 64 print as the same value to 6 d.p.
 #
 # The fix: output body-frame positions (x_rel_km etc.) multiplied by
-# GRAIN_VIS_SCALE into x_vis/y_vis/z_vis/Reff_vis columns.  These stay near
-# the Blender origin, so float32 has full precision, and the Blender DEM
-# script uses them directly — no solar-system SCALE conversion needed.
+# GRAIN_VIS_SCALE into x_vis/y_vis/z_vis/Reff_vis keys of the grains npz.
+# These stay near the Blender origin, so float32 has full precision, and
+# the Blender DEM script uses them directly — no solar-system SCALE
+# conversion needed.
 #
 # HOW TO CHOOSE THE VALUE
 # ───────────────────────
@@ -272,55 +273,52 @@ for dump in dump_files:
         z_rel_km = (g["z"].values - com_z) * to_km
         reff_km  = g["Reff"].values * to_km
 
-        # Per-grain DataFrame with both absolute (AU) and CoM-relative (km) positions
-        grains_df = pd.DataFrame({
-            "grain_id":   range(n_dem),
-            "time_s":     time_s,
-            # Absolute AU positions — only useful for locating Apophis in the
-            # solar system; DO NOT use to position individual grains in Blender
-            # (all 64 values are identical to 6 d.p. and float32 collapses them).
-            "x_au":       g["x"].values * to_au,
-            "y_au":       g["y"].values * to_au,
-            "z_au":       g["z"].values * to_au,
-            "x_km":       g["x"].values * to_km,
-            "y_km":       g["y"].values * to_km,
-            "z_km":       g["z"].values * to_km,
-            # Body-frame positions (km) relative to Apophis CoM.
-            # Use these — not x_au — whenever computing grain separation.
-            "x_rel_km":   x_rel_km,
-            "y_rel_km":   y_rel_km,
-            "z_rel_km":   z_rel_km,
-            "Reff_km":    reff_km,
-            "h_km":       g["h"].values * to_km,
-            # Pre-scaled body-frame coordinates for direct use in Blender.
-            # x_vis = x_rel_km * GRAIN_VIS_SCALE, kept near the origin so
-            # float32 has full precision (~1e-7 BU at these magnitudes vs
-            # ~2e-4 BU at 1750 BU where Apophis sits in solar-system scale).
-            # Use x_vis/y_vis/z_vis as the Blender object location;
-            # use Reff_vis as the sphere radius.
-            "x_vis":      x_rel_km * GRAIN_VIS_SCALE,
-            "y_vis":      y_rel_km * GRAIN_VIS_SCALE,
-            "z_vis":      z_rel_km * GRAIN_VIS_SCALE,
-            "Reff_vis":   reff_km  * GRAIN_VIS_SCALE,
-            "m":          g["m"].values,
-            # Velocity and spin are only present in full dumps (every nfulldump
-            # timesteps).  Mini dumps omit them; fill with NaN so the CSV
-            # schema stays consistent across all frames.
-            "vx":    g["vx"].values    if "vx"    in g.columns else np.nan,
-            "vy":    g["vy"].values    if "vy"    in g.columns else np.nan,
-            "vz":    g["vz"].values    if "vz"    in g.columns else np.nan,
-            "spinx": g["spinx"].values if "spinx" in g.columns else np.nan,
-            "spiny": g["spiny"].values if "spiny" in g.columns else np.nan,
-            "spinz": g["spinz"].values if "spinz" in g.columns else np.nan,
-        })
+        def _optional(col):
+            # Velocity and spin can be absent (mini dumps); NaN-fill keeps the key set fixed.
+            if col in g.columns:
+                return g[col].values.astype(np.float64)
+            return np.full(n_dem, np.nan)
 
-        # ── Write CSVs ────────────────────────────────────────────────────────
+        # One array per field; schema documented in CLAUDE.md "Grains npz".
+        # x_au is absolute: all grains agree to many d.p., so never place grains
+        # with it. x_vis = x_rel_km * GRAIN_VIS_SCALE stays near the Blender
+        # origin, where float32 object coordinates keep full precision.
+        grains = {
+            "grain_id": np.arange(n_dem, dtype=np.int64),
+            "time_s":   np.float64(time_s),
+            "x_au":     (g["x"].values * to_au).astype(np.float64),
+            "y_au":     (g["y"].values * to_au).astype(np.float64),
+            "z_au":     (g["z"].values * to_au).astype(np.float64),
+            "x_km":     (g["x"].values * to_km).astype(np.float64),
+            "y_km":     (g["y"].values * to_km).astype(np.float64),
+            "z_km":     (g["z"].values * to_km).astype(np.float64),
+            "x_rel_km": x_rel_km.astype(np.float64),
+            "y_rel_km": y_rel_km.astype(np.float64),
+            "z_rel_km": z_rel_km.astype(np.float64),
+            "Reff_km":  reff_km.astype(np.float64),
+            "h_km":     (g["h"].values * to_km).astype(np.float64),
+            "x_vis":    (x_rel_km * GRAIN_VIS_SCALE).astype(np.float64),
+            "y_vis":    (y_rel_km * GRAIN_VIS_SCALE).astype(np.float64),
+            "z_vis":    (z_rel_km * GRAIN_VIS_SCALE).astype(np.float64),
+            "Reff_vis": (reff_km * GRAIN_VIS_SCALE).astype(np.float64),
+            "m":        g["m"].values.astype(np.float64),
+            "vx":       _optional("vx"),
+            "vy":       _optional("vy"),
+            "vz":       _optional("vz"),
+            "spinx":    _optional("spinx"),
+            "spiny":    _optional("spiny"),
+            "spinz":    _optional("spinz"),
+        }
+
+        # ── Write outputs: bodies CSV, grains npz ─────────────────────────────
         basename   = os.path.basename(dump)
         bodies_out = os.path.join(BODIES_OUTPUT_DIR, basename + ".csv")
-        grains_out = os.path.join(GRAINS_OUTPUT_DIR, basename + ".csv")
+        grains_out = os.path.join(GRAINS_OUTPUT_DIR, basename + ".npz")
 
+        # Grains npz first: bodies are paired to grains by sorted position, so a
+        # failed npz write must not leave an orphan bodies CSV.
+        np.savez_compressed(grains_out, **grains)
         bodies_df.to_csv(bodies_out, index=False)
-        grains_df.to_csv(grains_out, index=False)
 
         time_val   = sdf_sinks.params.get("time", "N/A")
         mean_reff  = float(reff_km.mean())

@@ -2,7 +2,7 @@ import bpy
 import math
 import os
 import glob
-import csv
+import numpy as np
 from mathutils import Vector
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -26,7 +26,7 @@ CAM_ANGLE_DEG      = 30.0
 # Name of the Earth Empty created by DEMGrainsBlenderEarth.py.
 EARTH_EMPTY_NAME   = 'Earth'
 
-# Path to the grain CSVs — MUST match GRAINS_CSV_DIR in DEMGrainsBlenderEarth.py.
+# Path to the grain npz folder — MUST match GRAINS_CSV_DIR in DEMGrainsBlenderEarth.py.
 GRAIN_CSV_DIR = (
     'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/'
     'sobol_20260705_131545_baseline_58deg/run_0001_grains_output/'
@@ -73,7 +73,7 @@ CAM_FILL_LIGHT_ENERGY = 20000.0
 # Aiming the camera at the origin therefore shows empty space while the grain
 # cluster appears off to the side.
 #
-# Fix: each frame, load the grain CSV, sort grains by distance from the CoM,
+# Fix: each frame, load the grain npz file, sort grains by distance from the CoM,
 # take the closest CORE_GRAIN_FRACTION of them, and use their centroid as both
 # the camera aim point and the centre for distance computation.  This guarantees
 # the dense nucleus is always locked to the centre of the frame.
@@ -109,31 +109,24 @@ else:
         f'(az={CAM_GRAIN_ONLY_AZIMUTH_DEG}°, el={CAM_GRAIN_ONLY_ELEVATION_DEG}°).'
     )
 
-# ── Load grain CSVs (sorted, same order as DEMGrainsBlenderEarth.py) ─────────
-grain_files = sorted(glob.glob(os.path.join(GRAIN_CSV_DIR, '*.csv')))
+# ── Load grain npz files (sorted, same order as DEMGrainsBlenderEarth.py) ────
+grain_files = sorted(glob.glob(os.path.join(GRAIN_CSV_DIR, '*.npz')))
 if not grain_files:
     raise RuntimeError(
-        f'No grain CSVs found in {GRAIN_CSV_DIR}\n'
-        'Set GRAIN_CSV_DIR to match GRAINS_CSV_DIR in DEMGrainsBlenderEarth.py.'
+        f'No grain npz files found in {GRAIN_CSV_DIR}\n'
+        'Set GRAIN_CSV_DIR to match GRAINS_CSV_DIR in DEMGrainsBlenderEarth.py '
+        '(CSV-era grain folders must be reconverted with DEMtoCSV.py).'
     )
-print(f'Found {len(grain_files)} grain CSV(s) in {GRAIN_CSV_DIR}')
+print(f'Found {len(grain_files)} grain npz file(s) in {GRAIN_CSV_DIR}')
 
 
-def _grain_core(csv_path, fraction):
+def _grain_core(grain_path, fraction):
     """Return the centroid of the closest `fraction` of grains to the CoM."""
-    pts = []
-    with open(csv_path, newline='') as f:
-        for row in csv.DictReader(f):
-            x, y, z = float(row['x_vis']), float(row['y_vis']), float(row['z_vis'])
-            d = math.sqrt(x*x + y*y + z*z)
-            pts.append((d, x, y, z))
-    pts.sort()                           # closest to CoM (origin) first
+    d = np.load(grain_path)
+    pts = np.column_stack([d['x_vis'], d['y_vis'], d['z_vis']])
+    order = np.argsort(np.sqrt((pts * pts).sum(axis=1)), kind='stable')
     n = max(1, int(len(pts) * fraction))
-    sub = pts[:n]
-    cx = sum(r[1] for r in sub) / n
-    cy = sum(r[2] for r in sub) / n
-    cz = sum(r[3] for r in sub) / n
-    return Vector((cx, cy, cz))
+    return Vector(pts[order[:n]].mean(axis=0).tolist())
 
 
 scene   = bpy.context.scene
@@ -144,7 +137,7 @@ n_frames   = f_end - f_start + 1
 n_csvs     = len(grain_files)
 if n_frames != n_csvs:
     print(
-        f'WARNING: scene has {n_frames} frames but {n_csvs} grain CSVs. '
+        f'WARNING: scene has {n_frames} frames but {n_csvs} grain files. '
         'Using min of the two.'
     )
 
@@ -214,12 +207,12 @@ n_total = min(n_frames, n_csvs)
 
 for i in range(n_total):
     frame      = f_start + i
-    csv_path   = grain_files[i]
+    grain_path = grain_files[i]
 
     scene.frame_set(frame)
 
     # Dense grain core for this frame.
-    core_pos   = _grain_core(csv_path, CORE_GRAIN_FRACTION)
+    core_pos   = _grain_core(grain_path, CORE_GRAIN_FRACTION)
 
     if _use_earth_track:
         # Earth position relative to Apophis CoM (from the Earth Empty's keyframe).

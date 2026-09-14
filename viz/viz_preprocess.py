@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preprocess DEM grain CSVs (or PHANTOM dumps) into bulk Blender viz assets."""
+"""Preprocess DEM grain npz files (or PHANTOM dumps) into bulk Blender viz assets."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+from scipy.spatial import QhullError
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -29,23 +29,24 @@ from viz.dem_fof import (  # noqa: E402
     main_body_mask,
 )
 from viz.envelope import build_envelope  # noqa: E402
+from viz.path_utils import manifest_relpath as _manifest_path  # noqa: E402
 
 
-def _load_grains_csv(path: Path) -> dict:
-    df = pd.read_csv(path)
-    pos = df[["x_rel_km", "y_rel_km", "z_rel_km"]].to_numpy(dtype=np.float64)
-    radii = df["Reff_km"].to_numpy(dtype=np.float64)
-    mass = df["m"].to_numpy(dtype=np.float64) if "m" in df.columns else np.ones(len(df))
-    vel_cols = ["vx", "vy", "vz"]
-    if all(c in df.columns for c in vel_cols):
-        vel = df[vel_cols].to_numpy(dtype=np.float64)
-        vel = np.nan_to_num(vel, nan=0.0)
+def _load_grains(path: Path) -> dict:
+    d = np.load(path)
+    n = len(d["x_rel_km"])
+    pos = np.column_stack([d["x_rel_km"], d["y_rel_km"], d["z_rel_km"]]).astype(np.float64)
+    radii = d["Reff_km"].astype(np.float64)
+    mass = d["m"].astype(np.float64) if "m" in d.files else np.ones(n)
+    vel_keys = ("vx", "vy", "vz")
+    if all(k in d.files for k in vel_keys):
+        vel = np.nan_to_num(np.column_stack([d[k] for k in vel_keys]).astype(np.float64), nan=0.0)
     else:
-        vel = np.zeros((len(df), 3), dtype=np.float64)
+        vel = np.zeros((n, 3), dtype=np.float64)
     grain_id = (
-        df["grain_id"].to_numpy(dtype=np.uint32)
-        if "grain_id" in df.columns
-        else np.arange(len(df), dtype=np.uint32)
+        d["grain_id"].astype(np.uint32)
+        if "grain_id" in d.files
+        else np.arange(n, dtype=np.uint32)
     )
     return {
         "pos": pos,
@@ -76,10 +77,15 @@ def _select_ejecta_arrays(
         return pos_vis[idx], radius_vis[idx], grain_id[idx], False
 
     weights = mass[idx].astype(np.float64)
-    if weights.sum() <= 0.0:
+    if not np.isfinite(weights).all() or weights.sum() <= 0.0:
         weights = np.ones(len(idx), dtype=np.float64)
     rng = np.random.default_rng(seed)
-    chosen = rng.choice(idx, size=max_instances, replace=False, p=weights / weights.sum())
+    # Efraimidis-Spirakis weighted sampling without replacement: one O(n) key
+    # per candidate plus a partition, instead of the sequential rejection loop
+    # numpy uses for choice(replace=False, p=...) — that loop dominates at the
+    # 50k cap.
+    keys = np.log(rng.random(len(idx))) / np.maximum(weights, np.finfo(np.float64).tiny)
+    chosen = idx[np.argpartition(keys, -max_instances)[-max_instances:]]
     return pos_vis[chosen], radius_vis[chosen], grain_id[chosen], True
 
 
@@ -112,7 +118,9 @@ def _process_frame(
         pos, mass, vel, rg_ratio, min_mass_frac
     )
     mb = main_body_mask(pos, mass, rg_ratio=rg_ratio)
-    unbound_frac = unbound_mass_main_body(pos, mass, vel, main_body_mask=mb) / float(mass.sum())
+    m_tot = float(mass.sum())
+    unbound = unbound_mass_main_body(pos, mass, vel, main_mask=mb)
+    unbound_frac = unbound / m_tot if m_tot > 0.0 else 0.0
 
     pos_vis = pos * vis_scale
     radius_vis = radii * vis_scale
@@ -122,13 +130,18 @@ def _process_frame(
     )
 
     envelopes: list[dict] = []
-    m_tot = float(mass.sum())
     for frag_id, fmask in enumerate(fragment_masks):
         f_pos = pos[fmask]
         f_rad = radii[fmask]
         if len(f_pos) < 4:
             continue
-        verts, faces = build_envelope(f_pos, f_rad, vis_scale, method=envelope_method)
+        try:
+            verts, faces = build_envelope(f_pos, f_rad, vis_scale, method=envelope_method)
+        except (ValueError, QhullError) as exc:
+            # One degenerate fragment must not abort the whole run.
+            print(f"  [warn] fragment {frag_id} ({len(f_pos)} grains): "
+                  f"no envelope ({type(exc).__name__}); skipped")
+            continue
         mass_frac = float(mass[fmask].sum()) / m_tot if m_tot > 0 else 0.0
         envelopes.append({
             "fragment_id": frag_id,
@@ -143,7 +156,7 @@ def _process_frame(
         "unbound_fraction": float(unbound_frac),
         "n_fragments": len(envelopes),
         "n_ejecta": int(len(e_pos)),
-        "ejecta_subsampled": subsampled or (max_ejecta and int(ejecta_mask.sum()) > max_ejecta),
+        "ejecta_subsampled": bool(subsampled),
     }
     ejecta = {"pos": e_pos.astype(np.float32), "radius": e_rad.astype(np.float32), "grain_id": e_gid}
     return metrics, rg_initial, envelopes, ejecta, grains
@@ -164,9 +177,11 @@ def run_preprocess(
 ) -> Path:
     grains_dir = grains_dir.resolve()
     output_dir = output_dir.resolve()
-    csv_files = sorted(glob.glob(str(grains_dir / "*.csv")))
-    if not csv_files:
-        raise FileNotFoundError(f"No grain CSVs in {grains_dir}")
+    grain_files = sorted(glob.glob(str(grains_dir / "*.npz")))
+    if not grain_files:
+        raise FileNotFoundError(
+            f"No grain npz files in {grains_dir} (CSV-era folder? re-run DEMtoCSV.py)"
+        )
 
     if run_name is None:
         name = grains_dir.name
@@ -181,16 +196,16 @@ def run_preprocess(
         d.mkdir(parents=True, exist_ok=True)
 
     if max_frames is not None:
-        csv_files = csv_files[:max_frames]
+        grain_files = grain_files[:max_frames]
 
     frame_ids: list[str] = []
     rg_initial: float | None = None
     any_subsample = False
 
-    for i, csv_path in enumerate(csv_files):
+    for i, grain_path in enumerate(grain_files):
         frame_id = f"{i:05d}"
         frame_ids.append(frame_id)
-        grains = _load_grains_csv(Path(csv_path))
+        grains = _load_grains(Path(grain_path))
         metrics, rg_initial, envelopes, ejecta, _ = _process_frame(
             grains,
             rg_initial,
@@ -230,8 +245,14 @@ def run_preprocess(
             f"unbound={metrics['unbound_fraction']:.3f}"
         )
 
-    rel_bodies = "../" + (bodies_dir.name if bodies_dir else f"{run_name}_bodies_output")
-    rel_grains = "../" + grains_dir.name
+    # Relative to output_dir so the manifest survives an --output-dir that is
+    # not a sibling of the grains/bodies folders; os.path.relpath (not Path.relative_to)
+    # because it can walk up out of output_dir.
+    bodies_path = (
+        bodies_dir.resolve() if bodies_dir else grains_dir.parent / f"{run_name}_bodies_output"
+    )
+    rel_bodies = _manifest_path(bodies_path, output_dir)
+    rel_grains = _manifest_path(grains_dir, output_dir)
     manifest = {
         "schema_version": 1,
         "viz_mode": "composite",
@@ -243,7 +264,7 @@ def run_preprocess(
         "fragment_min_mass_frac": min_mass_frac,
         "ejecta_max_instances": max_ejecta,
         "envelope_method": envelope_method,
-        "input_mode": "csv",
+        "input_mode": "npz",
         "bodies_csv_dir": rel_bodies,
         "grains_csv_dir": rel_grains,
         "ejecta_subsampled": any_subsample,
@@ -275,15 +296,15 @@ def main() -> int:
     p.add_argument("--max-frames", type=int, default=None)
     p.add_argument(
         "--input-mode",
-        choices=("csv", "dump"),
-        default="csv",
-        help="dump mode reserved for P4 (not implemented yet)",
+        choices=("npz", "dump"),
+        default="npz",
+        help="npz = DEMtoCSV.py grain files; dump mode reserved for P4 (not implemented yet)",
     )
     p.add_argument("--dump-dir", type=Path, default=None)
     args = p.parse_args()
 
     if args.input_mode == "dump":
-        print("[ERROR] --input-mode dump is P4 (Objective 2 gate); use CSV for P0–P3.", file=sys.stderr)
+        print("[ERROR] --input-mode dump is P4 (Objective 2 gate); use grain npz files for P0–P3.", file=sys.stderr)
         return 1
 
     print(f"viz_preprocess: {args.grains_dir} -> {args.output_dir}")
