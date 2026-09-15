@@ -41,8 +41,16 @@ SMOOTH_INTERPOLATION = True
 INTERPOLATION_MODE   = 'BEZIER'   # 'BEZIER' or 'LINEAR'
 HANDLE_MODE          = 'AUTO_CLAMPED'
 
-# Material colour for the rubble-pile grains (RGBA, 0-1).
+# Material colour for the rubble-pile grains (RGBA, 0-1) -- used only as a
+# fallback if ROCK_MATERIAL_BLEND_PATH / ROCK_MATERIAL_NAME can't be appended.
 GRAIN_COLOR = (0.35, 0.30, 0.25, 1.0)
+
+# Procedural rock material for the grains, same node-based material the
+# million-particle instancing path (DEMBulkInstanceBlender.py) requires
+# pre-appended (Code/CLAUDE.md's "Prerequisite" note) -- Voronoi/Noise/Bump
+# nodes only, no image textures, so appending it carries no missing-file risk.
+ROCK_MATERIAL_BLEND_PATH = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert/Blenders/11.blend'
+ROCK_MATERIAL_NAME       = 'Procedural rock'
 
 # Name of the Blender collection that will hold all grain sphere objects.
 GRAIN_COLLECTION_NAME = 'DEM_Grains'
@@ -724,13 +732,35 @@ if _has_solar_system and _bodies_available:
 # ── Shared grain material ─────────────────────────────────────────────────────
 mat = bpy.data.materials.get('DEM_Grain')
 if mat is None:
-    mat = bpy.data.materials.new('DEM_Grain')
-    mat.use_nodes = True
-    bsdf = mat.node_tree.nodes.get('Principled BSDF')
-    if bsdf:
-        bsdf.inputs['Base Color'].default_value = GRAIN_COLOR
-        bsdf.inputs['Roughness'].default_value  = 0.85
-        bsdf.inputs['Metallic'].default_value   = 0.0
+    rock_src = bpy.data.materials.get(ROCK_MATERIAL_NAME)
+    if rock_src is None and os.path.isfile(ROCK_MATERIAL_BLEND_PATH):
+        with bpy.data.libraries.load(ROCK_MATERIAL_BLEND_PATH, link=False) as (data_from, data_to):
+            if ROCK_MATERIAL_NAME in data_from.materials:
+                data_to.materials = [ROCK_MATERIAL_NAME]
+            else:
+                print(
+                    f'WARNING: material {ROCK_MATERIAL_NAME!r} not found in '
+                    f'{ROCK_MATERIAL_BLEND_PATH} — falling back to flat grain color.'
+                )
+        rock_src = bpy.data.materials.get(ROCK_MATERIAL_NAME)
+
+    if rock_src is not None:
+        # .copy() rather than using rock_src directly -- keeps the grains'
+        # material independently named/editable as 'DEM_Grain' rather than
+        # aliasing the appended asset material by reference.
+        mat = rock_src.copy()
+        mat.name = 'DEM_Grain'
+        print(f'Grain material: procedural rock ({ROCK_MATERIAL_NAME!r} from {ROCK_MATERIAL_BLEND_PATH}).')
+    else:
+        if not os.path.isfile(ROCK_MATERIAL_BLEND_PATH):
+            print(f'WARNING: {ROCK_MATERIAL_BLEND_PATH} not found — falling back to flat grain color.')
+        mat = bpy.data.materials.new('DEM_Grain')
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get('Principled BSDF')
+        if bsdf:
+            bsdf.inputs['Base Color'].default_value = GRAIN_COLOR
+            bsdf.inputs['Roughness'].default_value  = 0.85
+            bsdf.inputs['Metallic'].default_value   = 0.0
 
 
 # ── Create grain collection ───────────────────────────────────────────────────
