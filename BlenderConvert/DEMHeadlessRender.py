@@ -1,19 +1,24 @@
-"""Headless per-sphere DEM render — not pasted into the Scripting tab.
+"""Headless DEM render (per-sphere, composite, or instance) — not pasted into the Scripting tab.
 
 Run with:
     blender.exe --background --python BlenderConvert/DEMHeadlessRender.py -- \\
-        --grains-dir PATH --bodies-dir PATH --output-dir PATH \\
+        --output-dir PATH \\
+        [--viz-path per_sphere|composite|instance] \\
+        [--grains-dir PATH --bodies-dir PATH]      (per_sphere) \\
+        [--manifest PATH/manifest.json]            (composite / instance) \\
         [--resolution 1920x1080] [--samples 500] [--fps 24] \\
         [--max-frames N] [--camera-mode auto|grain_only] \\
         [--encode-video] [--video-fps N]
 
-Text-patches BlenderConvert/DEMGrainsBlenderEarthCam.py's GRAINS_DIR /
-BODIES_CSV_DIR / CAMERA_MODE constants and exec()s it — the same technique
-sobol/Analysis/run_demtocsv_batch.py already uses on DEMDumpConvert.py —
-so grains + Earth + camera are built exactly as the interactive
-Scripting-tab path builds them. Then applies World
-"Deep Dark Space with Stars.001" (same HDRI as Apophisonly.blend),
-sets Cycles to OPTIX (else CUDA) GPU-only, and renders.
+Text-patches the chosen Blender script's config constants and exec()s it —
+the same technique sobol/Analysis/run_demtocsv_batch.py uses on
+DEMDumpConvert.py:
+  per_sphere -> DEMGrainsBlenderEarthCam.py  (GRAINS_DIR, BODIES_CSV_DIR, CAMERA_MODE)
+  composite  -> DEMBulkVizBlender.py         (VIZ_MANIFEST, CAMERA_MODE)
+  instance   -> DEMBulkInstanceBlender.py    (VIZ_MANIFEST, CAMERA_MODE,
+                                              SLOWMO_FACTOR=1, RENDER_RESOLUTION)
+Then applies World "Deep Dark Space with Stars.001" (same HDRI as
+Apophisonly.blend), sets Cycles to OPTIX (else CUDA) GPU-only, and renders.
 
 With --encode-video, the just-rendered frame_*.png sequence is combined
 into an MP4 (H264) via Blender's own VSE-scripted ffmpeg (no separate
@@ -21,6 +26,7 @@ ffmpeg install needed/expected on this machine) — an optional final
 stage, off by default so re-encoding isn't forced on every tuning pass.
 """
 import argparse
+import json
 import re
 import sys
 import traceback
@@ -37,6 +43,28 @@ _HDRI_RELATIVE = Path(
     "deep-dark-space-_d677e3ac-6716-4282-8978-9896d7f86c26/"
     "deep-dark-space-with-stars_4K_56e0040f-4645-4b62-b685-637b0eb970ed.exr"
 )
+
+VIZ_PATHS = ("per_sphere", "composite", "instance")
+SCRIPT_FOR_VIZ_PATH = {
+    "per_sphere": "DEMGrainsBlenderEarthCam.py",
+    "composite": "DEMBulkVizBlender.py",
+    "instance": "DEMBulkInstanceBlender.py",
+}
+# Same file and material name as DEMGrainsBlenderEarthCam.py's
+# ROCK_MATERIAL_BLEND_PATH / ROCK_MATERIAL_NAME. DEMBulkInstanceBlender.py
+# refuses to run without this material and deliberately never auto-appends
+# it (several similarly named rock materials exist), so the headless wrapper
+# appends it from this one known source before exec.
+ROCK_MATERIAL_NAME = "Procedural rock"
+_ROCK_MATERIAL_BLEND_RELATIVE = Path("Blenders/11.blend")
+
+# All patterned constants sit at column 0 in their scripts, exactly once.
+_GRAINS_DIR_RE = r"(?m)^GRAINS_DIR\s*=\s*\([^)]*\)"
+_BODIES_CSV_DIR_RE = r"(?m)^BODIES_CSV_DIR\s*=\s*\([^)]*\)"
+_VIZ_MANIFEST_RE = r"(?m)^VIZ_MANIFEST\s*=\s*\([^)]*\)"
+_CAMERA_MODE_RE = r"(?m)^CAMERA_MODE\s*=\s*None\b"
+_SLOWMO_FACTOR_RE = r"(?m)^SLOWMO_FACTOR\s*=\s*\d+"
+_RENDER_RESOLUTION_RE = r"(?m)^RENDER_RESOLUTION\s*=\s*\([^)]*\)"
 
 
 def deep_dark_space_hdri_path(script_dir=None) -> Path:
@@ -190,11 +218,31 @@ def encode_video(out_dir: Path, n_frames: int, fps: int, video_name: str = "anim
     return video_path
 
 
+def validate_args(args) -> None:
+    """Cross-flag rules argparse can't express. Raises ValueError."""
+    if args.viz_path == "per_sphere":
+        if not args.grains_dir or not args.bodies_dir:
+            raise ValueError("--viz-path per_sphere requires --grains-dir and --bodies-dir")
+        return
+    if not args.manifest:
+        raise ValueError(f"--viz-path {args.viz_path} requires --manifest")
+    manifest_path = Path(args.manifest)
+    if not manifest_path.is_file():
+        raise ValueError(f"--manifest not found: {manifest_path}")
+    viz_mode = json.loads(manifest_path.read_text(encoding="utf-8")).get("viz_mode")
+    if viz_mode != args.viz_path:
+        raise ValueError(
+            f"manifest viz_mode={viz_mode!r} does not match --viz-path {args.viz_path}"
+        )
+
+
 def _parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--grains-dir", required=True)
-    p.add_argument("--bodies-dir", required=True)
+    p.add_argument("--viz-path", choices=VIZ_PATHS, default="per_sphere")
+    p.add_argument("--manifest", default=None)
+    p.add_argument("--grains-dir", default=None)
+    p.add_argument("--bodies-dir", default=None)
     p.add_argument("--output-dir", required=True)
     p.add_argument("--resolution", default="1920x1080")
     p.add_argument("--samples", type=int, default=500)
@@ -203,54 +251,101 @@ def _parse_args():
     p.add_argument("--camera-mode", choices=("auto", "grain_only"), default="auto")
     p.add_argument("--encode-video", action="store_true", default=False)
     p.add_argument("--video-fps", type=int, default=None)
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    validate_args(args)
+    return args
 
 
-def _patch_and_exec(script_path: Path, grains_dir: str, bodies_dir: str, camera_mode: str) -> None:
-    src = script_path.read_text(encoding="utf-8")
+def parse_resolution(text: str):
+    m = re.match(r"^(\d+)x(\d+)$", text)
+    if not m:
+        raise ValueError(f"--resolution must be WxH (got {text!r})")
+    return int(m.group(1)), int(m.group(2))
 
-    # GRAINS_DIR / BODIES_CSV_DIR are multi-line parenthesized string
-    # literals (DEMGrainsBlenderEarthCam.py:21-28) -- replace the whole
-    # "NAME = ( ... )" block. Safe because neither literal contains ")".
-    src, n = re.subn(r"GRAINS_DIR\s*=\s*\([^)]*\)", f"GRAINS_DIR = {grains_dir!r}", src, count=1)
+
+def _sub_exactly_once(pattern: str, replacement: str, src: str, label: str) -> str:
+    n = len(re.findall(pattern, src))
     if n != 1:
-        raise RuntimeError(f"GRAINS_DIR pattern not found in {script_path}")
-    src, n = re.subn(r"BODIES_CSV_DIR\s*=\s*\([^)]*\)", f"BODIES_CSV_DIR = {bodies_dir!r}", src, count=1)
-    if n != 1:
-        raise RuntimeError(f"BODIES_CSV_DIR pattern not found in {script_path}")
+        raise RuntimeError(f"{label} pattern matched {n} time(s), expected exactly 1")
+    # A function replacement keeps backslashes in Windows paths literal.
+    return re.sub(pattern, lambda _m: replacement, src)
 
+
+def patch_script_source(viz_path, src, *, grains_dir=None, bodies_dir=None,
+                        manifest=None, camera_mode="auto", resolution=None):
+    """Return src with this path's config constants replaced. Pure — no bpy."""
+    if viz_path == "per_sphere":
+        src = _sub_exactly_once(_GRAINS_DIR_RE, f"GRAINS_DIR = {grains_dir!r}", src, "GRAINS_DIR")
+        src = _sub_exactly_once(
+            _BODIES_CSV_DIR_RE, f"BODIES_CSV_DIR = {bodies_dir!r}", src, "BODIES_CSV_DIR"
+        )
+    else:
+        src = _sub_exactly_once(_VIZ_MANIFEST_RE, f"VIZ_MANIFEST = {manifest!r}", src, "VIZ_MANIFEST")
+    if viz_path == "instance":
+        # One timeline frame == one sim frame, so --max-frames and the TUI's
+        # frame count stay correct.
+        src = _sub_exactly_once(_SLOWMO_FACTOR_RE, "SLOWMO_FACTOR = 1", src, "SLOWMO_FACTOR")
+        if resolution is not None:
+            src = _sub_exactly_once(
+                _RENDER_RESOLUTION_RE,
+                f"RENDER_RESOLUTION = ({int(resolution[0])}, {int(resolution[1])})",
+                src, "RENDER_RESOLUTION",
+            )
     if camera_mode == "grain_only":
-        # CAMERA_MODE (line ~97) is a separate single-line switch from
-        # IMPORT_SOLAR_SYSTEM -- it forces camera behavior, not whether
-        # solar-system bodies are imported.
-        src, n = re.subn(r"CAMERA_MODE\s*=\s*None", "CAMERA_MODE = 'grain_only'", src, count=1)
-        if n != 1:
-            raise RuntimeError(f"CAMERA_MODE pattern not found in {script_path}")
+        # CAMERA_MODE is a separate switch from IMPORT_SOLAR_SYSTEM -- it
+        # forces camera behavior, not whether solar-system bodies are imported.
+        src = _sub_exactly_once(_CAMERA_MODE_RE, "CAMERA_MODE = 'grain_only'", src, "CAMERA_MODE")
+    return src
 
-    exec(compile(src, str(script_path), "exec"), {"__name__": "__main__"})
+
+def ensure_procedural_rock_material(blend_path=None) -> None:
+    """Append "Procedural rock" from Blenders/11.blend unless already present."""
+    if bpy is None:
+        raise RuntimeError("bpy is required to append the Procedural rock material")
+    if bpy.data.materials.get(ROCK_MATERIAL_NAME) is not None:
+        return
+    path = (
+        Path(blend_path) if blend_path is not None
+        else Path(__file__).resolve().parent / _ROCK_MATERIAL_BLEND_RELATIVE
+    )
+    if not path.is_file():
+        raise RuntimeError(f"{path} not found -- needed for {ROCK_MATERIAL_NAME!r} (instance path)")
+    found = False
+    with bpy.data.libraries.load(str(path).replace("\\", "/"), link=False) as (data_from, data_to):
+        if ROCK_MATERIAL_NAME in data_from.materials:
+            data_to.materials = [ROCK_MATERIAL_NAME]
+            found = True
+    if not found or bpy.data.materials.get(ROCK_MATERIAL_NAME) is None:
+        raise RuntimeError(f"material {ROCK_MATERIAL_NAME!r} not found in {path}")
 
 
 def main() -> None:
     args = _parse_args()
-    m = re.match(r"^(\d+)x(\d+)$", args.resolution)
-    if not m:
-        raise ValueError(f"--resolution must be WxH (got {args.resolution!r})")
-    res_x, res_y = int(m.group(1)), int(m.group(2))
+    res_x, res_y = parse_resolution(args.resolution)
+    script_dir = Path(__file__).resolve().parent
+    script_path = script_dir / SCRIPT_FOR_VIZ_PATH[args.viz_path]
 
-    script_path = Path(__file__).parent / "DEMGrainsBlenderEarthCam.py"
-    grains_dir = str(Path(args.grains_dir).resolve()).replace("\\", "/") + "/"
-    bodies_dir = str(Path(args.bodies_dir).resolve()).replace("\\", "/") + "/"
-    # Resolve output-dir to an absolute path *before* exec'ing the DEM
-    # script below -- DEMGrainsBlenderEarthCam.py loads TheEarth1.blend via
-    # bpy.data.libraries.load(blend_path, link=False) (its line 558), which
-    # as a side effect changes Blender's process working directory to that
-    # .blend's folder. A relative output-dir
-    # resolved (or mkdir'd) after that point silently lands under the wrong
-    # directory instead of the caller's cwd -- confirmed live: PNGs wrote to
-    # "C:\DEMCSVs\..." instead of the repo's "DEMCSVs\..." until this was
-    # hoisted above the exec call.
+    # Resolve every path *before* exec'ing the DEM script: those scripts load
+    # .blend libraries (TheEarth1.blend, 11.blend) via
+    # bpy.data.libraries.load(..., link=False), which changes Blender's
+    # process working directory. A relative path resolved after that silently
+    # lands under the wrong directory -- confirmed live in v1: PNGs wrote to
+    # "C:\DEMCSVs\..." until output-dir resolution was hoisted above exec.
     out_dir = Path(args.output_dir).resolve()
-    _patch_and_exec(script_path, grains_dir, bodies_dir, args.camera_mode)
+    patch_kwargs = {"camera_mode": args.camera_mode, "resolution": (res_x, res_y)}
+    if args.viz_path == "per_sphere":
+        patch_kwargs["grains_dir"] = str(Path(args.grains_dir).resolve()).replace("\\", "/") + "/"
+        patch_kwargs["bodies_dir"] = str(Path(args.bodies_dir).resolve()).replace("\\", "/") + "/"
+    else:
+        patch_kwargs["manifest"] = str(Path(args.manifest).resolve()).replace("\\", "/")
+
+    if args.viz_path == "instance":
+        ensure_procedural_rock_material()
+
+    src = patch_script_source(
+        args.viz_path, script_path.read_text(encoding="utf-8"), **patch_kwargs
+    )
+    exec(compile(src, str(script_path), "exec"), {"__name__": "__main__", "__file__": str(script_path)})
     setup_deep_dark_space_world()
 
     scene = bpy.context.scene
@@ -263,6 +358,11 @@ def main() -> None:
     scene.render.resolution_y = res_y
     scene.render.resolution_percentage = 100
     scene.render.fps = args.fps
+    if args.viz_path != "per_sphere":
+        # The bulk scripts' frame_change_pre handlers rewrite mesh data between
+        # frames during the animation render; lock the interface so the render
+        # never reads half-updated geometry.
+        scene.render.use_lock_interface = True
 
     out_dir.mkdir(parents=True, exist_ok=True)
     scene.render.image_settings.media_type = 'IMAGE'
@@ -270,7 +370,7 @@ def main() -> None:
     scene.render.filepath = str(out_dir) + "/frame_"
 
     print(
-        f"[DEMHeadlessRender] Rendering frames {scene.frame_start}-{scene.frame_end} "
+        f"[DEMHeadlessRender] Rendering {args.viz_path} frames {scene.frame_start}-{scene.frame_end} "
         f"at {res_x}x{res_y}, {args.samples} samples, GPU, to {out_dir}"
     )
     bpy.ops.render.render(animation=True)
