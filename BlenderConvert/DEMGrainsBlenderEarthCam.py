@@ -52,6 +52,14 @@ GRAIN_COLOR = (0.35, 0.30, 0.25, 1.0)
 ROCK_MATERIAL_BLEND_PATH = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert/Blenders/11.blend'
 ROCK_MATERIAL_NAME       = 'Procedural rock'
 
+# Every grain shares one material, and that material is driven by Object
+# texture coordinates, so unrotated spheres all show the identical rock pattern
+# (a clone-tiling look). A fixed random orientation per grain turns the pattern
+# with the sphere -- same trick DEMBulkInstanceBlender.py's _add_random_rotation
+# wires into the instancing path. Seeded so reruns of a sim match frame for frame.
+GRAIN_RANDOM_ROTATION      = True
+GRAIN_RANDOM_ROTATION_SEED = 0
+
 # Name of the Blender collection that will hold all grain sphere objects.
 GRAIN_COLLECTION_NAME = 'DEM_Grains'
 
@@ -774,13 +782,26 @@ first = np.load(grain_files[0])
 n_grains = len(first['grain_id'])
 print(f'Creating {n_grains} grain spheres from {os.path.basename(grain_files[0])} ...')
 
-for gid, radius, x, y, z in zip(first['grain_id'], first['Reff_vis'],
-                                first['x_vis'], first['y_vis'], first['z_vis']):
+# One fixed orientation per grain, drawn up front so the draw order (and so
+# each grain's orientation) depends only on the seed, not on anything later.
+# Never keyframed below -- only location animates, so the rock pattern stays
+# locked to its grain instead of swimming across frames.
+if GRAIN_RANDOM_ROTATION:
+    _rot_rng   = np.random.default_rng(GRAIN_RANDOM_ROTATION_SEED)
+    grain_rots = _rot_rng.uniform(0.0, 2.0 * math.pi, size=(n_grains, 3))
+else:
+    grain_rots = np.zeros((n_grains, 3))
+
+for (gid, radius, x, y, z), rot in zip(
+        zip(first['grain_id'], first['Reff_vis'],
+            first['x_vis'], first['y_vis'], first['z_vis']),
+        grain_rots):
     name = f'DEM_Grain_{int(gid):03d}'
 
     bpy.ops.mesh.primitive_uv_sphere_add(
         radius=float(radius), segments=12, ring_count=8,
         location=(float(x), float(y), float(z)),
+        rotation=(float(rot[0]), float(rot[1]), float(rot[2])),
     )
     obj      = bpy.context.object
     obj.name = name
