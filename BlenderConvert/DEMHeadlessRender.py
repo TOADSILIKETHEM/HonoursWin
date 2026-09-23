@@ -330,7 +330,18 @@ def ensure_procedural_rock_material(blend_path=None) -> None:
         raise RuntimeError(f"material {ROCK_MATERIAL_NAME!r} not found in {path}")
 
 
+def _line_buffer_std_streams() -> None:
+    """Flush print() output per line. Blender's Python block-buffers stdout
+    into a pipe (and ignores PYTHONUNBUFFERED), so the TUI's render.log and
+    live status line would otherwise only see output when Blender exits."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(line_buffering=True)
+
+
 def main() -> None:
+    _line_buffer_std_streams()
     args = _parse_args()
     res_x, res_y = parse_resolution(args.resolution)
     script_dir = Path(__file__).resolve().parent
