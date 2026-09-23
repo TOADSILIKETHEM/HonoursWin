@@ -26,6 +26,11 @@ BODIES_CSV_DIR = (
     'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/'
     'sobol_20260705_131545_baseline_58deg/run_0001_bodies_output/'
 )
+# None = import every grain file; N = only the first N (DEMHeadlessRender.py
+# patches this from --max-frames so short test renders skip building frames
+# they will never render).
+MAX_FRAMES = None
+
 # None = auto-detect from bodies CSV; True/False = force solar-system import on/off.
 IMPORT_SOLAR_SYSTEM = None
 
@@ -136,6 +141,9 @@ if not grain_files:
         f'No grain npz files found in {GRAINS_DIR}\n'
         'Run CSVconvert/DEMDumpConvert.py first (CSV-era grain folders must be reconverted).'
     )
+
+if MAX_FRAMES is not None:
+    grain_files = grain_files[:MAX_FRAMES]
 
 print(f'Found {len(grain_files)} grain npz file(s).')
 
