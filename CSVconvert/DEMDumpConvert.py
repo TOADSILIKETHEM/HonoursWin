@@ -104,7 +104,12 @@ def _parse_setup_flags(input_dir):
 
 
 def _dem_model(use_dem, use_dem_as_sinks):
-    """'particle', 'sink' or None. No use_dem_as_sinks key = pre-merge setup, where use_dem meant sinks."""
+    """'particle', 'sink' or None. No use_dem_as_sinks key = pre-merge setup, where use_dem meant sinks.
+
+    No setup flags at all (sobol.setup missing) = 'sink': keep the old sink auto-detect.
+    """
+    if use_dem is None and use_dem_as_sinks is None:
+        return "sink"
     if use_dem_as_sinks:
         return "sink"
     if use_dem and use_dem_as_sinks is None:
@@ -182,30 +187,36 @@ else:
 for dump in dump_files:
     try:
         result = sarracen.read_phantom(dump, separate_types="all")
-        sdf_sinks = result[-1]
+        # sarracen returns a bare DataFrame when the dump has no sinks (apophis_only particle DEM)
+        if isinstance(result, (list, tuple)):
+            sdf_sinks = result[-1]
+            sdf_parts = result[0] if len(result) > 1 else None
+        else:
+            sdf_sinks, sdf_parts = None, result
 
-        if sdf_sinks is None or len(sdf_sinks) == 0:
+        if _SETUP_DEM_MODEL != "particle" and (sdf_sinks is None or len(sdf_sinks) == 0):
             print(f"  [{dump}] No sink particles found, skipping.")
             continue
+        sdf_meta = sdf_sinks if sdf_sinks is not None and len(sdf_sinks) > 0 else sdf_parts
 
         # Unit conversions
-        udist     = float(sdf_sinks.params.get("udist", 1.0))  # code unit in cm
-        utime_raw = sdf_sinks.params.get("utime")
+        udist     = float(sdf_meta.params.get("udist", 1.0))  # code unit in cm
+        utime_raw = sdf_meta.params.get("utime")
         if utime_raw is None:
             print(f'  WARNING [{os.path.basename(dump)}]: "utime" not in params; time_s equals raw code-unit time.')
             utime_s = 1.0
         else:
             utime_s = float(utime_raw)
-        time_code = float(sdf_sinks.params.get("time", 0.0))
+        time_code = float(sdf_meta.params.get("time", 0.0))
         time_s    = time_code * utime_s
         to_km    = udist / KM_IN_CM   # code unit → km
         to_au    = udist / AU_IN_CM   # code unit → AU
 
-        n_sinks  = len(sdf_sinks)
+        n_sinks  = 0 if sdf_sinks is None else len(sdf_sinks)
         if _SETUP_DEM_MODEL == "particle":
             # grains are idem particles; every sink is a solar-system body
             n_bodies = int(N_BODIES) if N_BODIES is not None else n_sinks
-            g_particles = _particle_grains(result[0]) if len(result) > 1 else pd.DataFrame()
+            g_particles = _particle_grains(sdf_parts) if sdf_parts is not None else pd.DataFrame()
             n_dem = len(g_particles)
         else:
             n_bodies = (
@@ -359,7 +370,7 @@ for dump in dump_files:
         np.savez_compressed(grains_out, **grains)
         bodies_df.to_csv(bodies_out, index=False)
 
-        time_val   = sdf_sinks.params.get("time", "N/A")
+        time_val   = sdf_meta.params.get("time", "N/A")
         mean_reff  = float(reff_km.mean())
         vis_extent = float(np.sqrt(
             (x_rel_km**2 + y_rel_km**2 + z_rel_km**2).max()
