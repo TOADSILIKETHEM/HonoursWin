@@ -74,13 +74,14 @@ KM_IN_CM = 1.0e5
 
 
 def _parse_setup_flags(input_dir):
-    """Read apophis_only, np_apophis, use_dem from sobol.setup if present."""
+    """Read apophis_only, np_apophis, use_dem, use_dem_as_sinks from sobol.setup if present."""
     setup_path = os.path.join(input_dir, "sobol.setup")
     apophis_only = None
     np_apophis = None
     use_dem = None
+    use_dem_as_sinks = None
     if not os.path.isfile(setup_path):
-        return apophis_only, np_apophis, use_dem
+        return apophis_only, np_apophis, use_dem, use_dem_as_sinks
     with open(setup_path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             stripped = line.split("!", 1)[0].strip()
@@ -97,7 +98,38 @@ def _parse_setup_flags(input_dir):
                 np_apophis = int(float(val))
             elif key == "use_dem":
                 use_dem = val.upper().startswith("T")
-    return apophis_only, np_apophis, use_dem
+            elif key == "use_dem_as_sinks":
+                use_dem_as_sinks = val.upper().startswith("T")
+    return apophis_only, np_apophis, use_dem, use_dem_as_sinks
+
+
+def _dem_model(use_dem, use_dem_as_sinks):
+    """'particle', 'sink' or None. No use_dem_as_sinks key = pre-merge setup, where use_dem meant sinks."""
+    if use_dem_as_sinks:
+        return "sink"
+    if use_dem and use_dem_as_sinks is None:
+        return "sink"
+    if use_dem:
+        return "particle"
+    return None
+
+
+def _particle_grains(sdf_parts):
+    """DEM grain frame from idem particles: grain radius R = h (Mia fbc0e4e63)."""
+    keep = sdf_parts["h"].values > 0
+    if "itype" in sdf_parts.columns:
+        keep &= sdf_parts["itype"].values == 2
+    p = sdf_parts[keep]
+    if "m" in p.columns:
+        m = p["m"].values
+    else:
+        m = np.full(len(p), float(sdf_parts.params["massoftype_2"]))
+    cols = {"x": p["x"].values, "y": p["y"].values, "z": p["z"].values,
+            "h": p["h"].values, "Reff": p["h"].values, "m": m}
+    for c in ("vx", "vy", "vz"):
+        if c in p.columns:
+            cols[c] = p[c].values
+    return pd.DataFrame(cols)
 
 
 def _detect_n_bodies(sdf_sinks, to_km, setup_apophis_only=None):
@@ -117,7 +149,8 @@ def _detect_n_bodies(sdf_sinks, to_km, setup_apophis_only=None):
     return int(np.sum(h_km >= GRAIN_REFF_THRESHOLD_KM))
 
 
-_SETUP_APOPHIS_ONLY, _SETUP_NP_APOPHIS, _SETUP_USE_DEM = _parse_setup_flags(INPUT_DIR)
+_SETUP_APOPHIS_ONLY, _SETUP_NP_APOPHIS, _SETUP_USE_DEM, _SETUP_USE_DEM_AS_SINKS = _parse_setup_flags(INPUT_DIR)
+_SETUP_DEM_MODEL = _dem_model(_SETUP_USE_DEM, _SETUP_USE_DEM_AS_SINKS)
 if _SETUP_NP_APOPHIS is not None:
     _MIN_DEM_AUTO = max(10, _SETUP_NP_APOPHIS - max(50, _SETUP_NP_APOPHIS // 10))
 else:
@@ -129,7 +162,7 @@ _n_bodies_mode = "auto" if N_BODIES is None else str(N_BODIES)
 print(
     f"DEMDumpConvert: {_sim_name}/{_run_name}\n"
     f"  setup: apophis_only={_SETUP_APOPHIS_ONLY}, np_apophis={_SETUP_NP_APOPHIS}, "
-    f"use_dem={_SETUP_USE_DEM}\n"
+    f"use_dem={_SETUP_USE_DEM}, dem_model={_SETUP_DEM_MODEL}\n"
     f"  MIN_DEM_GRAINS={MIN_DEM_GRAINS}, N_BODIES={_n_bodies_mode}\n"
     f"  bodies → {BODIES_OUTPUT_DIR}\n"
     f"  grains → {GRAINS_OUTPUT_DIR}\n"
@@ -169,15 +202,21 @@ for dump in dump_files:
         to_au    = udist / AU_IN_CM   # code unit → AU
 
         n_sinks  = len(sdf_sinks)
-        n_bodies = (
-            int(N_BODIES)
-            if N_BODIES is not None
-            else _detect_n_bodies(sdf_sinks, to_km, _SETUP_APOPHIS_ONLY)
-        )
-        n_dem    = n_sinks - n_bodies
+        if _SETUP_DEM_MODEL == "particle":
+            # grains are idem particles; every sink is a solar-system body
+            n_bodies = int(N_BODIES) if N_BODIES is not None else n_sinks
+            g_particles = _particle_grains(result[0]) if len(result) > 1 else pd.DataFrame()
+            n_dem = len(g_particles)
+        else:
+            n_bodies = (
+                int(N_BODIES)
+                if N_BODIES is not None
+                else _detect_n_bodies(sdf_sinks, to_km, _SETUP_APOPHIS_ONLY)
+            )
+            n_dem = n_sinks - n_bodies
 
-        if _SETUP_USE_DEM is False:
-            print(f"  [{os.path.basename(dump)}] use_dem=F in setup — no DEM grains, skipped")
+        if _SETUP_DEM_MODEL is None:
+            print(f"  [{os.path.basename(dump)}] no DEM model in setup — no DEM grains, skipped")
             continue
         if _SETUP_NP_APOPHIS is not None and _SETUP_NP_APOPHIS <= 1:
             print(
@@ -199,7 +238,7 @@ for dump in dump_files:
                     f"{h_bodies.min():.4f} km < threshold {GRAIN_REFF_THRESHOLD_KM} km. "
                     f"Check N_BODIES (detected {n_bodies})."
                 )
-        if n_dem > 0:
+        if n_dem > 0 and _SETUP_DEM_MODEL != "particle":
             reff_grains = sdf_sinks["Reff"].iloc[n_bodies:].values * to_km
             if reff_grains.max() > GRAIN_REFF_THRESHOLD_KM:
                 print(
@@ -238,7 +277,7 @@ for dump in dump_files:
                 )
 
         # ── DEM grains (rows n_bodies … end) ─────────────────────────────────
-        g = sdf_sinks.iloc[n_bodies:]
+        g = g_particles if _SETUP_DEM_MODEL == "particle" else sdf_sinks.iloc[n_bodies:]
         if len(g) == 0:
             print(f"  [{os.path.basename(dump)}] no DEM grains after body split — skipped")
             continue
