@@ -2,8 +2,10 @@
 
 Paste into Blender Scripting tab (or open the file directly). Reads a
 ``viz_mode: "instance"`` manifest from viz_preprocess_lite.py (static placeholder,
-``static: true``) or synthetic_flyby_test.py (per-frame rigid tumble test data,
-``static: false``). Existing per-sphere and composite importers are unchanged.
+``static: true``), synthetic_flyby_test.py (per-frame rigid tumble test data,
+``static: false``) or viz_preprocess_grains_instance.py (the real grains,
+``static: false``, per-grain ``radius``). Existing per-sphere and composite
+importers are unchanged.
 """
 
 import json
@@ -15,7 +17,7 @@ import numpy as np
 from mathutils import Quaternion, Vector
 
 _DEFAULT_BLENDER_CONVERT_DIR = (
-    'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert'
+    r'\\wsl.localhost\Ubuntu\home\mboyle\Honours\Code\BlenderConvert'
 )
 try:
     _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -35,7 +37,7 @@ import P0_InstancingSpike as p0  # noqa: E402
 
 # -- Configuration ------------------------------------------------------------
 VIZ_MANIFEST = (
-    'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/torque_align_obj/run_0001_viz_instance/manifest.json'
+    'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs/torque_align_obj/run_0001_viz_instance_flyby_test/manifest.json'
 )
 BODIES_CSV_DIR = None
 IMPORT_SOLAR_SYSTEM = None
@@ -143,8 +145,14 @@ def _cleanup_previous():
         bpy.data.node_groups.remove(group)
 
 
-def _build_point_cloud(pos, grain_radius_vis, subdiv):
-    """Point-cloud mesh + shared icosphere + GN 'Instance on Points', via P0_InstancingSpike."""
+def _build_point_cloud(pos, grain_radius_vis, subdiv, radii=None):
+    """Point-cloud mesh + shared icosphere + GN 'Instance on Points', via P0_InstancingSpike.
+
+    ``radii`` (float32, one per point) sets each instance's radius -- used by
+    real-grain manifests (viz_preprocess_grains_instance.py) so polydisperse
+    grains render at their own size. Without it every instance gets
+    ``grain_radius_vis`` (static placeholder and synthetic manifests).
+    """
     n_points = len(pos)
     mesh = bpy.data.meshes.new('DEM_InstancePoints_mesh')
     mesh.vertices.add(n_points)
@@ -152,7 +160,13 @@ def _build_point_cloud(pos, grain_radius_vis, subdiv):
     mesh.update()
 
     attr = mesh.attributes.new(p0.RADIUS_ATTR, 'FLOAT', 'POINT')
-    attr.data.foreach_set('value', np.full(n_points, grain_radius_vis, dtype=np.float32))
+    if radii is None:
+        radius_values = np.full(n_points, grain_radius_vis, dtype=np.float32)
+    else:
+        radius_values = np.ascontiguousarray(radii, dtype=np.float32)
+        if len(radius_values) != n_points:
+            raise ValueError(f'radii has {len(radius_values)} entries, pos has {n_points}')
+    attr.data.foreach_set('value', radius_values)
 
     point_obj = bpy.data.objects.new('DEM_InstancePoints', mesh)
     bpy.context.scene.collection.objects.link(point_obj)
@@ -298,13 +312,18 @@ def main():
     _cleanup_previous()
 
     first_points_path = _points_path_for_frame(viz_dir, manifest, 0)
-    pos = np.load(first_points_path)['pos']
+    first_points = np.load(first_points_path)
+    pos = first_points['pos']
     if len(pos) != manifest['n_points']:
         raise ValueError(
             f"{os.path.basename(first_points_path)} has {len(pos)} points but manifest "
             f"says n_points={manifest['n_points']}"
         )
-    point_obj, _group = _build_point_cloud(pos, manifest['grain_radius_vis'], GRAIN_SUBDIV)
+    # Real-grain manifests carry a per-grain radius; a grain's radius never
+    # changes over a run, so setting it once here is enough -- the frame
+    # handler keeps updating only 'co'.
+    radii = first_points['radius'] if 'radius' in first_points.files else None
+    point_obj, _group = _build_point_cloud(pos, manifest['grain_radius_vis'], GRAIN_SUBDIV, radii=radii)
     print(f'point cloud: {len(pos):,} points, grain_radius={manifest["grain_radius_vis"]:.4f} BU')
 
     _viz_state.update({

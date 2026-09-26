@@ -4,9 +4,11 @@ import os
 import pandas as pd
 
 # ── Configuration ────────────────────────────────────────────────────────────
-INPUT_DIR    = r"\\wsl.localhost\Ubuntu\home\mboyle\solarsystem"  # input folder for your dump files
+# Run with WSL python3 (code lives in ~/Honours/Code since 2026-09-25).
+# Point-mass dumps are no longer on disk (solarsystem/ removed); set this to a new run.
+INPUT_DIR    = "/home/mboyle/Honours/solarsystem"  # input folder for your dump files
 DUMP_PATTERN = "solarsystem1_*"   # glob pattern for your dump files
-OUTPUT_DIR   = "csv_output"       # folder where CSVs will be saved
+OUTPUT_DIR   = "/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/csv_output"  # OneDrive data folder (Blender reads it)
 # ─────────────────────────────────────────────────────────────────────────────
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)

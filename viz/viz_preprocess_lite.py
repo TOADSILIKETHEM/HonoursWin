@@ -9,11 +9,14 @@ DEMBulkVizBlender.py consumes a `viz_mode: "composite"` manifest.
 Runs under Blender's bundled Python (needs mathutils.bvhtree via
 viz/shape_sampling.py), not the plain venv:
 
-    & "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe" --background --python viz/viz_preprocess_lite.py -- \\
-        --grains-dir DEMCSVs/torque_align_obj/run_0001_grains_output \\
-        --bodies-dir DEMCSVs/torque_align_obj/run_0001_bodies_output \\
-        --output-dir DEMCSVs/torque_align_obj/run_0001_viz_instance \\
-        --shape-obj "BlenderConvert/Shapes/.../apophis_v233s7.obj" \\
+    # from WSL ~/Honours/Code; blender.exe needs Windows-form paths (wslpath -w)
+    B="/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe"
+    D=/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code
+    "$B" --background --python "$(wslpath -w viz/viz_preprocess_lite.py)" -- \\
+        --grains-dir "$(wslpath -w $D/DEMCSVs/torque_align_obj/run_0001_grains_output)" \\
+        --bodies-dir "$(wslpath -w $D/DEMCSVs/torque_align_obj/run_0001_bodies_output)" \\
+        --output-dir "$(wslpath -w $D/DEMCSVs/torque_align_obj/run_0001_viz_instance)" \\
+        --shape-obj "$(wslpath -w $D/BlenderConvert/Shapes/.../apophis_v233s7.obj)" \\
         --n-points 1000000
 
 Real per-frame million-grain ingestion (`static: false`) is not

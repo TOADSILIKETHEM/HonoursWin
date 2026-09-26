@@ -27,6 +27,7 @@ stage, off by default so re-encoding isn't forced on every tuning pass.
 """
 import argparse
 import json
+import os
 import re
 import sys
 import traceback
@@ -58,6 +59,16 @@ SCRIPT_FOR_VIZ_PATH = {
 ROCK_MATERIAL_NAME = "Procedural rock"
 _ROCK_MATERIAL_BLEND_RELATIVE = Path("Blenders/11.blend")
 
+# .blend / HDRI assets are untracked and stay in the OneDrive folder; the code
+# itself lives in WSL (~/Honours/Code) since 2026-09-25. Blender (Windows)
+# and pytest (WSL) see that folder under different roots.
+_ASSETS_DIR_WIN = "C:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert"
+_ASSETS_DIR_WSL = "/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert"
+ASSETS_DIR = Path(
+    os.environ.get("HONOURS_BLENDER_ASSETS_DIR")
+    or (_ASSETS_DIR_WIN if os.name == "nt" else _ASSETS_DIR_WSL)
+)
+
 # All patterned constants sit at column 0 in their scripts, exactly once.
 _GRAINS_DIR_RE = r"(?m)^GRAINS_DIR\s*=\s*\([^)]*\)"
 _BODIES_CSV_DIR_RE = r"(?m)^BODIES_CSV_DIR\s*=\s*\([^)]*\)"
@@ -68,7 +79,7 @@ _RENDER_RESOLUTION_RE = r"(?m)^RENDER_RESOLUTION\s*=\s*\([^)]*\)"
 
 
 def deep_dark_space_hdri_path(script_dir=None) -> Path:
-    root = Path(script_dir) if script_dir is not None else Path(__file__).resolve().parent
+    root = Path(script_dir) if script_dir is not None else ASSETS_DIR
     return root / _HDRI_RELATIVE
 
 
@@ -306,7 +317,7 @@ def ensure_procedural_rock_material(blend_path=None) -> None:
         return
     path = (
         Path(blend_path) if blend_path is not None
-        else Path(__file__).resolve().parent / _ROCK_MATERIAL_BLEND_RELATIVE
+        else ASSETS_DIR / _ROCK_MATERIAL_BLEND_RELATIVE
     )
     if not path.is_file():
         raise RuntimeError(f"{path} not found -- needed for {ROCK_MATERIAL_NAME!r} (instance path)")

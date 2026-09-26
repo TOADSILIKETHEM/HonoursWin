@@ -18,11 +18,14 @@ does not attempt that.
 Runs under Blender's bundled Python (needs mathutils, and shape_sampling needs
 mathutils.bvhtree), same as viz_preprocess_lite.py:
 
-    & "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe" --background --python viz/synthetic_flyby_test.py -- \\
-        --grains-dir DEMCSVs/torque_align_obj/run_0001_grains_output \\
-        --bodies-dir DEMCSVs/torque_align_obj/run_0001_bodies_output \\
-        --output-dir DEMCSVs/torque_align_obj/run_0001_viz_instance_flyby_test \\
-        --shape-obj "BlenderConvert/Shapes/.../apophis_v233s7.obj" \\
+    # from WSL ~/Honours/Code; blender.exe needs Windows-form paths (wslpath -w)
+    B="/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe"
+    D=/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code
+    "$B" --background --python "$(wslpath -w viz/synthetic_flyby_test.py)" -- \\
+        --grains-dir "$(wslpath -w $D/DEMCSVs/torque_align_obj/run_0001_grains_output)" \\
+        --bodies-dir "$(wslpath -w $D/DEMCSVs/torque_align_obj/run_0001_bodies_output)" \\
+        --output-dir "$(wslpath -w $D/DEMCSVs/torque_align_obj/run_0001_viz_instance_flyby_test)" \\
+        --shape-obj "$(wslpath -w $D/BlenderConvert/Shapes/.../apophis_v233s7.obj)" \\
         --n-points 1000000 --max-frames 48
 """
 

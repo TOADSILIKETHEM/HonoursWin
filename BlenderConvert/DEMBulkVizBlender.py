@@ -15,7 +15,7 @@ import sys
 import numpy as np
 
 _DEFAULT_BLENDER_CONVERT_DIR = (
-    'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert'
+    r'\\wsl.localhost\Ubuntu\home\mboyle\Honours\Code\BlenderConvert'
 )
 try:
     _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -43,7 +43,7 @@ USE_FRAME_CHANGE_HANDLER = True
 
 GRAIN_COLOR = (0.35, 0.30, 0.25, 1.0)
 ENVELOPE_COLOR = (0.38, 0.32, 0.27, 1.0)
-EJECTA_ICO_SUBDIV = 1
+EJECTA_ICO_SUBDIV = 3
 
 CORE_GRAIN_FRACTION = 0.80
 # ─────────────────────────────────────────────────────────────────────────────

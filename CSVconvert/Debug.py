@@ -2,7 +2,8 @@ import sarracen
 import os
 
 # Read one dump file
-dump_file = r"\\wsl.localhost\Ubuntu\home\mboyle\solarsystem\solarsystem1_00001"
+# WSL python3; point-mass dumps are no longer on disk (solarsystem/ removed) -- set to a real dump.
+dump_file = "/home/mboyle/Honours/solarsystem/solarsystem1_00001"
 
 result = sarracen.read_phantom(dump_file, separate_types='all')
 sdf_sinks = result[-1]
