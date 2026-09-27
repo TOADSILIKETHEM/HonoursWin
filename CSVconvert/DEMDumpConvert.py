@@ -1,5 +1,6 @@
 import sarracen
 import glob
+import json
 import os
 import pandas as pd
 import numpy as np
@@ -29,6 +30,20 @@ BODY_NAMES = [
     "Sun", "Mercury", "Venus", "Earth", "Moon",
     "Mars", "Jupiter", "Saturn", "Uranus", "Neptune",
 ]
+
+
+def _encounter_mode(input_dir):
+    """'hyperbola' when the sobol runner wrote encounter.json (phantomflyby: Earth is the only sink)."""
+    p = os.path.join(input_dir, "encounter.json")
+    if not os.path.isfile(p):
+        return "ephemeris"
+    with open(p, encoding="utf-8") as fh:
+        return json.load(fh).get("mode", "ephemeris")
+
+
+_ENCOUNTER_MODE = _encounter_mode(INPUT_DIR)
+# phantomflyby adds exactly one sink, the Earth perturber; the solar-system order does not apply.
+_BODY_NAMES = ["Earth"] if _ENCOUNTER_MODE == "hyperbola" else BODY_NAMES
 
 # Sinks with h or Reff (in km, after unit conversion) below this threshold are
 # treated as DEM grains rather than solar system bodies.  Grain Reff ~0.05 km;
@@ -259,10 +274,13 @@ for dump in dump_files:
                 )
 
         # ── Solar system bodies (rows 0 … n_bodies-1) ────────────────────────
+        if _ENCOUNTER_MODE == "hyperbola" and n_bodies != 1:
+            print(f"  WARNING [{os.path.basename(dump)}]: hyperbola run with {n_bodies} body sinks "
+                  f"(expected 1, the Earth perturber)")
         if n_bodies > 0:
             b = sdf_sinks.iloc[:n_bodies]
             bodies_df = pd.DataFrame({
-                "name":   BODY_NAMES[: len(b)],
+                "name":   _BODY_NAMES[: len(b)],
                 "time_s": time_s,
                 "x_au":   b["x"].values * to_au,
                 "y_au":   b["y"].values * to_au,
