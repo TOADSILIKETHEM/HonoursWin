@@ -513,13 +513,24 @@ sun_lamp_obj = None
 existing = bpy.data.objects.get('DEM_SunLight')
 if existing:
     bpy.data.objects.remove(existing, do_unlink=True)
-if _has_solar_system and _bodies_available:
+# phantomflyby runs have Earth but no Sun row: keyframing the lamp direction has nothing to read
+_has_sun_row = 'Sun' in _bodies_row_names(grain_files)
+if _has_solar_system and _bodies_available and _has_sun_row:
     lamp_data        = bpy.data.lights.new('DEM_SunLight', 'SUN')
     lamp_data.energy = SUN_LAMP_ENERGY
     lamp_data.angle  = SUN_LAMP_ANGLE
     sun_lamp_obj     = bpy.data.objects.new('DEM_SunLight', lamp_data)
     bpy.context.scene.collection.objects.link(sun_lamp_obj)
     print('Sun lamp "DEM_SunLight" created (keyframed from bodies CSV).')
+elif _has_solar_system and _bodies_available and not _has_sun_row:
+    lamp_data        = bpy.data.lights.new('DEM_SunLight', 'SUN')
+    lamp_data.energy = SUN_LAMP_ENERGY
+    lamp_data.angle  = SUN_LAMP_ANGLE
+    sun_lamp_obj     = bpy.data.objects.new('DEM_SunLight', lamp_data)
+    bpy.context.scene.collection.objects.link(sun_lamp_obj)
+    sun_dir = mathutils.Vector(APOPHIS_ONLY_SUN_DIRECTION).normalized()
+    sun_lamp_obj.rotation_euler = (-sun_dir).to_track_quat('-Z', 'Y').to_euler()
+    print('Sun lamp "DEM_SunLight" created (fixed direction, no Sun row).')
 elif not _has_solar_system:
     lamp_data        = bpy.data.lights.new('DEM_SunLight', 'SUN')
     lamp_data.energy = SUN_LAMP_ENERGY
@@ -615,7 +626,7 @@ if _has_solar_system and _bodies_available and _has_moon_row:
 
 # ── Create Sun visual body (UV sphere, separate position/size scales) ──────────
 sun_body_empty = None
-if _has_solar_system and _bodies_available:
+if _has_solar_system and _bodies_available and _has_sun_row:
     bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
     sun_body_empty      = bpy.context.object
     sun_body_empty.name = 'Sun_Visual'
