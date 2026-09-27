@@ -185,6 +185,19 @@ def _detect_solar_system_bodies(grain_files):
     return 'Earth' in names or 'Sun' in names
 
 
+def _bodies_row_names(grain_files):
+    """Body names in the first bodies CSV ('Earth', 'Moon', ...); empty set if none."""
+    if not grain_files:
+        return set()
+    bodies_path = _bodies_csv_for(grain_files[0])
+    if not bodies_path:
+        return set()
+    try:
+        return set(pd.read_csv(bodies_path, usecols=['name'])['name'].astype(str))
+    except (ValueError, KeyError, OSError):
+        return set()
+
+
 _has_solar_system = (
     bool(IMPORT_SOLAR_SYSTEM)
     if IMPORT_SOLAR_SYSTEM is not None
@@ -573,7 +586,9 @@ if earth_empty is not None:
 
 # ── Create Moon (UV sphere, same scale as Earth) ──────────────────────────────
 moon_empty = None
-if _has_solar_system and _bodies_available:
+# phantomflyby runs have Earth but no Moon row: an unkeyframed Moon would sit on Apophis at the origin
+_has_moon_row = 'Moon' in _bodies_row_names(grain_files)
+if _has_solar_system and _bodies_available and _has_moon_row:
     bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
     moon_empty      = bpy.context.object
     moon_empty.name = 'Moon'
