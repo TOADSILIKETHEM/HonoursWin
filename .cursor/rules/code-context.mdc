@@ -1,0 +1,33 @@
+---
+description: Code SCI4502 session defaults — S2-first, Blender confirm, context protocol
+alwaysApply: true
+---
+
+# Code — post-processing session defaults
+
+**SCI4502** current. **SCI4501** submitted.
+Shared facts: `../docs/SHARED_FACTS.md`. Code in WSL; data/Blender outputs in OneDrive (`CLAUDE.md` top).
+New or changed context: read **`../docs/AGENT_CONTEXT.md` first**.
+
+## S2-first
+
+This workspace: dump convert, Blender, `DEMCSVs/`, bulk viz. PHANTOM/sweeps: `../CLAUDE.md`.
+Do not treat S1 Word as live. Confirm which thesis before § numbering.
+
+## Confirm before assuming
+
+- **Cycles, not EEVEE.** Last confirmed Blender **5.2.1 LTS** at `C:\Program Files\Blender Foundation\Blender 5.2\blender.exe` — re-verify if a fix depends on version.
+- Which `DEMCSVs/` run, which `.blend` / scene.
+- Viz path: D3 = composite mesh deformation (`SHARED_FACTS.md`). Per-sphere ≠ D3. Instancing extra. Do not assume million-grain per-frame dumps exist.
+
+## Doc index
+
+| Read when | File |
+|-----------|------|
+| Add / sync context | `../docs/AGENT_CONTEXT.md` |
+| Shared facts | `../docs/SHARED_FACTS.md` |
+| Dated / branch | `../docs/CONTEXT_CHANGELOG.md` |
+| Canonical viz datasets | `docs/BATCHES_VIZ.md` |
+| Blender / convert hub | `CLAUDE.md` → `docs/BLENDER_OPS.md`, `docs/PIPELINE_REFERENCE.md` |
+| Campaigns (sim) | `../docs/BATCHES.md` |
+| S2 scope | `../ThesisStuff/SCI4502_SCOPE_CONTEXT.md` |

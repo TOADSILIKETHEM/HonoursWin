@@ -1,8 +1,7 @@
 """
 DEM rubble-pile import + Earth-tracking camera — single Blender script.
 
-Equivalent to running DEMGrainsBlenderEarth.py, then DEMCamera.py.
-Set SETUP_CAMERA = False to run the import only (same as Earth script alone).
+Set SETUP_CAMERA = False to run the import only.
 """
 
 import bpy
@@ -29,7 +28,7 @@ BODIES_CSV_DIR = (
 # None = auto-detect from bodies CSV; True/False = force solar-system import on/off.
 IMPORT_SOLAR_SYSTEM = None
 
-# Run DEMCamera logic after import. Auto: Earth-track if solar system, else grain-only.
+# Camera after import. Auto: Earth-track if solar system, else grain-only.
 SETUP_CAMERA = True
 
 # Sun lamp settings.
@@ -96,7 +95,7 @@ VOLUMETRIC_END     = 50000.0
 VOLUMETRIC_SAMPLES = 128
 VOLUMETRIC_TILE_PX = '2'
 
-# ── Camera (DEMCamera.py) ─────────────────────────────────────────────────────
+# ── Camera ───────────────────────────────────────────────────────────────────
 CAMERA_NAME         = 'DEM_TrackCam'
 CAMERA_FOV_DEG      = 70.0
 CAM_DIST_BU         = 150.0
@@ -250,7 +249,7 @@ def _grain_core(grain_path, fraction):
 
 def setup_dem_track_camera(earth_empty, grain_files):
     """
-    Create and keyframe DEM_TrackCam — same behaviour as DEMCamera.py.
+    Create and keyframe DEM_TrackCam.
     Uses Earth-tracking when earth_empty is set (full solar system), else grain-only orbit.
     """
     use_earth_track = (
@@ -984,7 +983,7 @@ else:
         'apophis_only run: grains only; fixed Sun lamp (no Earth/Sun/Moon bodies).'
     )
 
-# ── Camera setup (DEMCamera.py) ───────────────────────────────────────────────
+# ── Camera setup ──────────────────────────────────────────────────────────────
 if SETUP_CAMERA:
     print('\n── Setting up tracking camera ──')
     setup_dem_track_camera(earth_empty, grain_files)
@@ -1007,7 +1006,7 @@ if SETUP_CAMERA:
         else:
             print(f'WARNING: camera "{CAMERA_NAME}" not found — fill light skipped.')
 else:
-    print('\nSETUP_CAMERA is False — skipping camera (run DEMCamera.py separately if needed).')
+    print('\nSETUP_CAMERA is False — skipping camera.')
 
 print(
     '\nAll done. Do NOT run Viewport.py (tuned for point-mass scale).\n'

@@ -325,6 +325,7 @@ def main():
         scene.frame_set(scene.frame_start)
         _viz_frame_change_handler(scene)
 
+    cinematic.ensure_sun_lamp(has_solar, bodies_dir)
     earth_empty = cinematic.ensure_earth_placeholder(has_solar, bodies_dir)
     with cinematic.frame_handler_suspended(_viz_frame_change_handler):
         earth_empty = cinematic.keyframe_bodies_and_earth(

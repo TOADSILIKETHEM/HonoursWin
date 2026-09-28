@@ -11,6 +11,7 @@ importers are unchanged.
 import json
 import os
 import sys
+from collections import OrderedDict
 
 import bpy
 import numpy as np
@@ -32,8 +33,13 @@ else:
 if BLENDER_CONVERT_DIR not in sys.path:
     sys.path.insert(0, BLENDER_CONVERT_DIR)
 
+_CODE_DIR = os.path.dirname(BLENDER_CONVERT_DIR)
+if _CODE_DIR not in sys.path:
+    sys.path.insert(0, _CODE_DIR)
+
 import DEMCinematicSetup as cinematic  # noqa: E402
 import P0_InstancingSpike as p0  # noqa: E402
+from viz.fcurve_handles import evaluate as bezier_evaluate  # noqa: E402
 
 # -- Configuration ------------------------------------------------------------
 VIZ_MANIFEST = (
@@ -50,15 +56,21 @@ RENDER_RESOLUTION = (1920, 1080)
 # higher fps -- same simulated duration, slower/smoother playback. For a
 # synthetic rigid_tumble manifest (has "angles_rad"), the point cloud is ALSO
 # interpolated smoothly (exact analytic rotation at the fractional real frame)
-# -- see _instance_frame_change_handler. Any other static:false manifest (real
-# per-frame simulation data, once implemented) has no analytic model to
-# interpolate, so each real points frame is held for SLOWMO_FACTOR consecutive
-# timeline frames instead -- expect visible stepping there until an
-# interpolation scheme for real data exists.
+# -- see _instance_frame_change_handler. Real-grain manifests with Bezier
+# handles are interpolated on the same curve the per-sphere path keyframes;
+# older manifests without handles hold each real frame (visible stepping).
 SLOWMO_FACTOR = 4
 TARGET_FPS = 60
-GRAIN_SUBDIV = 1
+# Shared instance mesh: the per-sphere path's 12x8 flat-shaded UV sphere
+# (DEMGrainsBlenderEarthCam.py), so both paths render identical grains.
+GRAIN_UV_SEGMENTS = 12
+GRAIN_UV_RINGS = 8
 PROCEDURAL_ROCK_MAT_NAME = 'Procedural rock'
+INSTANCE_MAT_NAME = 'DEM_GrainInstance'
+# Per-sphere camera settings (DEMGrainsBlenderEarthCam.py).
+CORE_GRAIN_FRACTION = 0.80
+CAMERA_ROTATION_INTERP = 'LINEAR'
+SETUP_CAM_FILL_LIGHT = True
 # -----------------------------------------------------------------------------
 
 _viz_state = {
@@ -67,8 +79,8 @@ _viz_state = {
     'static': True,
     'point_obj_name': None,
     'loaded_frame': -1,
-    'slowmo_factor': 1,
     'base_pos': None,  # frame-0 (unrotated) points, cached for analytic rigid_tumble interpolation
+    'frames': None,  # grain_interp-style cache: frame index -> (pos, handle) for Bezier manifests
 }
 
 
@@ -136,27 +148,83 @@ def _cleanup_previous():
         obj = bpy.data.objects.get(name)
         if obj is not None:
             bpy.data.objects.remove(obj, do_unlink=True)
-    for name in ('DEM_InstancePoints_mesh', 'DEM_InstanceIco'):
+    for name in ('DEM_InstancePoints_mesh', 'DEM_InstanceGrainMesh'):
         mesh = bpy.data.meshes.get(name)
         if mesh is not None and mesh.users == 0:
             bpy.data.meshes.remove(mesh)
     group = bpy.data.node_groups.get('DEM_InstanceOnPoints')
     if group is not None and group.users == 0:
         bpy.data.node_groups.remove(group)
+    mat = bpy.data.materials.get(INSTANCE_MAT_NAME)
+    if mat is not None and mat.users == 0:
+        bpy.data.materials.remove(mat)
 
 
-def _build_point_cloud(pos, grain_radius_vis, subdiv, radii=None):
-    """Point-cloud mesh + shared icosphere + GN 'Instance on Points', via P0_InstancingSpike.
+def _make_grain_mesh():
+    """Shared unit-radius instance mesh (GRAIN_UV_SEGMENTS x GRAIN_UV_RINGS UV sphere)."""
+    import bmesh
+    mesh = bpy.data.meshes.new('DEM_InstanceGrainMesh')
+    bm = bmesh.new()
+    try:
+        # Same op and arguments bpy.ops.mesh.primitive_uv_sphere_add uses;
+        # faces stay flat-shaded like the per-sphere path's primitives.
+        bmesh.ops.create_uvsphere(
+            bm, u_segments=GRAIN_UV_SEGMENTS, v_segments=GRAIN_UV_RINGS, radius=1.0,
+        )
+        bm.to_mesh(mesh)
+    finally:
+        bm.free()
+    return mesh
+
+
+def _instance_rock_material(src):
+    """Copy of ``src`` whose Object texture coordinates are scaled by the instance radius.
+
+    'Procedural rock' samples Object coordinates. A per-sphere grain's mesh is
+    built at its own radius, so its Object coordinates span +/-radius; an
+    instance is a unit mesh scaled by the GN Scale input, so its Object
+    coordinates span +/-1. Multiplying by the instancer's ``radius`` attribute
+    gives every instance the per-sphere texture scale.
+    """
+    old = bpy.data.materials.get(INSTANCE_MAT_NAME)
+    if old is not None:
+        bpy.data.materials.remove(old)
+    mat = src.copy()
+    mat.name = INSTANCE_MAT_NAME
+    nt = mat.node_tree
+    for tc in [n for n in nt.nodes if n.bl_idname == 'ShaderNodeTexCoord']:
+        out = tc.outputs['Object']
+        targets = [link.to_socket for link in out.links]
+        if not targets:
+            continue
+        attr = nt.nodes.new('ShaderNodeAttribute')
+        attr.attribute_type = 'INSTANCER'
+        attr.attribute_name = p0.RADIUS_ATTR
+        attr.location = (tc.location.x, tc.location.y - 220)
+        scale = nt.nodes.new('ShaderNodeVectorMath')
+        scale.operation = 'SCALE'
+        scale.location = (tc.location.x + 180, tc.location.y)
+        nt.links.new(out, scale.inputs[0])
+        nt.links.new(attr.outputs['Fac'], scale.inputs['Scale'])
+        for sock in targets:
+            nt.links.new(scale.outputs['Vector'], sock)
+    return mat
+
+
+def _build_point_cloud(pos, grain_radius_vis, radii=None, rots=None):
+    """Point-cloud mesh + shared grain mesh + GN 'Instance on Points', via P0_InstancingSpike.
 
     ``radii`` (float32, one per point) sets each instance's radius -- used by
     real-grain manifests (viz_preprocess_grains_instance.py) so polydisperse
     grains render at their own size. Without it every instance gets
     ``grain_radius_vis`` (static placeholder and synthetic manifests).
+    ``rots`` (float32 Euler XYZ, one per point) fixes each instance's
+    orientation to the per-sphere path's; without it GN draws random ones.
     """
     n_points = len(pos)
     mesh = bpy.data.meshes.new('DEM_InstancePoints_mesh')
     mesh.vertices.add(n_points)
-    mesh.vertices.foreach_set('co', np.ascontiguousarray(pos).ravel())
+    mesh.vertices.foreach_set('co', np.ascontiguousarray(pos, dtype=np.float32).ravel())
     mesh.update()
 
     attr = mesh.attributes.new(p0.RADIUS_ATTR, 'FLOAT', 'POINT')
@@ -167,23 +235,44 @@ def _build_point_cloud(pos, grain_radius_vis, subdiv, radii=None):
         if len(radius_values) != n_points:
             raise ValueError(f'radii has {len(radius_values)} entries, pos has {n_points}')
     attr.data.foreach_set('value', radius_values)
+    if rots is not None:
+        rot_values = np.ascontiguousarray(rots, dtype=np.float32)
+        if rot_values.shape != (n_points, 3):
+            raise ValueError(f'rots has shape {rot_values.shape}, expected ({n_points}, 3)')
+        rot_attr = mesh.attributes.new(ROT_ATTR, 'FLOAT_VECTOR', 'POINT')
+        rot_attr.data.foreach_set('vector', rot_values.ravel())
 
     point_obj = bpy.data.objects.new('DEM_InstancePoints', mesh)
     bpy.context.scene.collection.objects.link(point_obj)
 
-    material = _get_procedural_rock_material()
-    ico_mesh = p0._make_icosphere(subdiv)
-    ico_mesh.name = 'DEM_InstanceIco'
-    ico_mesh.materials.append(material)
-    instance_obj = bpy.data.objects.new('DEM_InstanceMesh', ico_mesh)
+    material = _instance_rock_material(_get_procedural_rock_material())
+    grain_mesh = _make_grain_mesh()
+    grain_mesh.materials.append(material)
+    instance_obj = bpy.data.objects.new('DEM_InstanceMesh', grain_mesh)
     bpy.context.scene.collection.objects.link(instance_obj)
     instance_obj.hide_render = True
     instance_obj.hide_viewport = True
 
     group, _modifier = p0.build_geometry_nodes(point_obj, instance_obj)
     group.name = 'DEM_InstanceOnPoints'
-    _add_random_rotation(group)
+    if rots is not None:
+        _add_attribute_rotation(group)
+    else:
+        _add_random_rotation(group)
     return point_obj, group
+
+
+ROT_ATTR = 'rot'
+
+
+def _add_attribute_rotation(group):
+    """Wire the per-point ``rot`` attribute (Euler XYZ) into Instance on Points."""
+    n_iop = next(n for n in group.nodes if n.bl_idname == 'GeometryNodeInstanceOnPoints')
+    n_rot = group.nodes.new('GeometryNodeInputNamedAttribute')
+    n_rot.data_type = 'FLOAT_VECTOR'
+    n_rot.inputs['Name'].default_value = ROT_ATTR
+    n_rot.location = (n_iop.location.x - 300, n_iop.location.y + 200)
+    group.links.new(n_rot.outputs['Attribute'], n_iop.inputs['Rotation'])
 
 
 def _add_random_rotation(group):
@@ -207,23 +296,66 @@ def _add_random_rotation(group):
     group.links.new(rotation_output, n_iop.inputs['Rotation'])
 
 
+def _key_index(scene):
+    """Fractional real-frame index for the scene's current (sub)frame.
+
+    Uses the same remapped time Blender evaluates F-curves at (frame_map
+    old/new, subframe included), so the points stay locked to the Earth,
+    Sun and camera keyframes at any SLOWMO_FACTOR and under motion blur.
+    """
+    ctime = (scene.frame_current + scene.frame_subframe) * (
+        scene.render.frame_map_old / scene.render.frame_map_new
+    )
+    return ctime - scene.frame_start
+
+
+def _load_key(k):
+    """(pos, handle) float64 arrays for real frame ``k`` (cached, 4 frames)."""
+    st = _viz_state
+    cache = st['frames']
+    if k in cache:
+        cache.move_to_end(k)
+        return cache[k]
+    d = np.load(_points_path_for_frame(st['viz_dir'], st['manifest'], k))
+    entry = (d['pos'].astype(np.float64), d['handle'].astype(np.float64))
+    cache[k] = entry
+    if len(cache) > 4:
+        cache.popitem(last=False)
+    return entry
+
+
+def bezier_points(idx):
+    """Grain positions at fractional real-frame index ``idx``: the per-sphere
+    path's location F-curves (Bezier, AUTO_CLAMPED, continuous-acceleration
+    handles precomputed by viz/fcurve_handles.py), constant outside the keys."""
+    n = len(_viz_state['manifest']['frame_ids'])
+    idx = min(max(float(idx), 0.0), float(n - 1))
+    k = int(np.floor(idx))
+    y0, h0 = _load_key(k)
+    t = idx - k
+    if k >= n - 1 or t == 0.0:
+        return y0
+    y1, h1 = _load_key(k + 1)
+    return bezier_evaluate(y0, h0, y1, h1, t)
+
+
 @bpy.app.handlers.persistent
 def _instance_frame_change_handler(scene):
-    """Reload and re-upload the current frame's points for a ``static: false`` manifest.
+    """Re-upload the points for the current (sub)frame of a ``static: false`` manifest.
 
     Mirrors DEMBulkVizBlender.py's _update_ejecta_obj: only the vertex buffer
-    changes (point count and grain_radius_vis are fixed for the whole run), so
-    this is a foreach_set + mesh.update(), not a mesh rebuild.
+    changes (point count and radii are fixed for the whole run), so this is a
+    foreach_set + mesh.update(), not a mesh rebuild. The real-frame index comes
+    from _key_index(), i.e. the time Blender evaluates the Earth/camera F-curves at.
 
-    Two paths:
+    Three paths:
+    - Real-grain manifests with ``interpolation`` (viz_preprocess_grains_instance.py):
+      Bezier between real frames, the exact curve the per-sphere path keyframes.
     - Synthetic rigid_tumble manifests carry ``angles_rad`` (exact rotation angle
-      per real frame, about a fixed ``spin_axis``) -- with SLOWMO_FACTOR > 1 this
-      lets the tumble be evaluated at the exact fractional real-frame time instead
-      of holding each real frame for SLOWMO_FACTOR timeline frames, which reads as
-      jittery/stepped motion once the camera/Earth (F-curve interpolated) move
-      smoothly across the same stretched timeline.
-    - Anything else (real per-frame simulation data, once implemented) has no
-      analytic model to interpolate -- held-frame reload is the only option.
+      per real frame, about a fixed ``spin_axis``), evaluated at the fractional
+      real-frame time.
+    - Anything else (older real-grain manifests without handles): each real
+      frame is held until the next one.
     """
     st = _viz_state
     manifest = st['manifest']
@@ -231,12 +363,20 @@ def _instance_frame_change_handler(scene):
         return
     frame_ids = manifest['frame_ids']
     n = len(frame_ids)
-    frac_idx = (scene.frame_current - scene.frame_start) / st['slowmo_factor']
-    frac_idx = max(0.0, min(frac_idx, n - 1))
+    frac_idx = max(0.0, min(_key_index(scene), n - 1))
     obj = bpy.data.objects.get(st['point_obj_name'])
     if obj is None:
         return
     mesh = obj.data
+
+    if st['frames'] is not None:
+        if frac_idx == st['loaded_frame']:
+            return
+        pos = bezier_points(frac_idx).astype(np.float32)
+        mesh.vertices.foreach_set('co', pos.ravel())
+        mesh.update()
+        st['loaded_frame'] = frac_idx
+        return
 
     angles = manifest.get('angles_rad')
     base_pos = st.get('base_pos')
@@ -323,7 +463,18 @@ def main():
     # changes over a run, so setting it once here is enough -- the frame
     # handler keeps updating only 'co'.
     radii = first_points['radius'] if 'radius' in first_points.files else None
-    point_obj, _group = _build_point_cloud(pos, manifest['grain_radius_vis'], GRAIN_SUBDIV, radii=radii)
+    rots = first_points['rot'] if 'rot' in first_points.files else None
+    point_obj, _group = _build_point_cloud(
+        pos, manifest['grain_radius_vis'], radii=radii, rots=rots
+    )
+    bezier = (
+        not static
+        and (manifest.get('interpolation') or {}).get('mode') == 'bezier'
+        and 'handle' in first_points.files
+    )
+    if not static and not bezier and 'angles_rad' not in manifest:
+        print('NOTE: manifest has no Bezier handles (older viz_preprocess_grains_instance.py '
+              'output) -- each real frame is held; re-run the preprocess for smooth motion.')
     print(f'point cloud: {len(pos):,} points, grain_radius={manifest["grain_radius_vis"]:.4f} BU')
 
     _viz_state.update({
@@ -332,10 +483,10 @@ def main():
         'static': static,
         'point_obj_name': point_obj.name,
         'loaded_frame': 0,
-        'slowmo_factor': SLOWMO_FACTOR,
         # frame 0 has angle_rad == 0 by construction (t0 == times[0] in
         # synthetic_flyby_test.py), so it doubles as the unrotated base shape.
         'base_pos': np.ascontiguousarray(pos, dtype=np.float32),
+        'frames': OrderedDict() if bezier else None,
     })
 
     if _instance_frame_change_handler in bpy.app.handlers.frame_change_pre:
@@ -344,18 +495,30 @@ def main():
         bpy.app.handlers.frame_change_pre.append(_instance_frame_change_handler)
         cinematic.register_self_as_auto_run_module()
 
+    # Same lights and bodies as DEMGrainsBlenderEarthCam.py.
+    cinematic.ensure_sun_lamp(has_solar, bodies_dir)
     earth_empty = cinematic.ensure_earth_placeholder(has_solar, bodies_dir)
+    cinematic.ensure_moon(has_solar, bodies_dir)
+    cinematic.ensure_sun_visual(has_solar, bodies_dir)
+    cinematic.apply_viewport_clip()
     with cinematic.frame_handler_suspended(_instance_frame_change_handler):
         earth_empty = cinematic.keyframe_bodies_and_earth(
             bodies_dir, len(frame_ids), has_solar, earth_empty,
             start_index=int(manifest.get('bodies_start_index', 0)),
         )
         if SETUP_CAMERA:
-            def _core_fn(_i):
-                return Vector((0.0, 0.0, 0.0))  # static rigid body, centered on Apophis CoM
-            cinematic.setup_camera(
-                len(frame_ids), _core_fn, earth_empty, has_solar, camera_mode=CAMERA_MODE
+            def _core_fn(i):
+                if static:
+                    return Vector((0.0, 0.0, 0.0))  # static placeholder, centred on Apophis CoM
+                # Per-sphere camera: centroid of the innermost CORE_GRAIN_FRACTION grains.
+                pts = np.load(_points_path_for_frame(viz_dir, manifest, i))['pos']
+                return cinematic.grain_core(pts.astype(np.float64), CORE_GRAIN_FRACTION)
+            cam_obj = cinematic.setup_camera(
+                len(frame_ids), _core_fn, earth_empty, has_solar, camera_mode=CAMERA_MODE,
+                rotation_interp=CAMERA_ROTATION_INTERP,
             )
+            if SETUP_CAM_FILL_LIGHT:
+                cinematic.add_camera_fill_light(cam_obj)
         scene.frame_set(scene.frame_start)
 
     # Apply time-stretch for playback only, now that all keyframes are authored

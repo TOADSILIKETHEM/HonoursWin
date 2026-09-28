@@ -146,7 +146,7 @@ def _particle_grains(sdf_parts):
         m = np.full(len(p), float(sdf_parts.params["massoftype_2"]))
     cols = {"x": p["x"].values, "y": p["y"].values, "z": p["z"].values,
             "h": p["h"].values, "Reff": p["h"].values, "m": m}
-    for c in ("vx", "vy", "vz"):
+    for c in ("iorig", "vx", "vy", "vz"):
         if c in p.columns:
             cols[c] = p[c].values
     return pd.DataFrame(cols)
@@ -280,7 +280,7 @@ for dump in dump_files:
         if n_bodies > 0:
             b = sdf_sinks.iloc[:n_bodies]
             bodies_df = pd.DataFrame({
-                "name":   _BODY_NAMES[: len(b)],
+                "name":   (list(_BODY_NAMES) + [f"sink{i + 1}" for i in range(len(_BODY_NAMES), len(b))])[: len(b)],
                 "time_s": time_s,
                 "x_au":   b["x"].values * to_au,
                 "y_au":   b["y"].values * to_au,
@@ -352,7 +352,9 @@ for dump in dump_files:
         # with it. x_vis = x_rel_km * GRAIN_VIS_SCALE stays near the Blender
         # origin, where float32 object coordinates keep full precision.
         grains = {
-            "grain_id": np.arange(n_dem, dtype=np.int64),
+            # Particle DEM: PHANTOM's iorig follows a grain through reorders.
+            "grain_id": (g["iorig"].values if "iorig" in g.columns
+                         else np.arange(n_dem)).astype(np.int64),
             "time_s":   np.float64(time_s),
             "x_au":     (g["x"].values * to_au).astype(np.float64),
             "y_au":     (g["y"].values * to_au).astype(np.float64),

@@ -42,6 +42,20 @@ CAM_GRAIN_ONLY_AZIMUTH_DEG = 45.0
 CAM_GRAIN_ONLY_ELEVATION_DEG = 20.0
 CAM_CLIP_START = 0.01
 CAM_CLIP_END = 20_000_000.0
+# Below: per-sphere-only scene pieces (DEMGrainsBlenderEarthCam.py values),
+# opt-in via ensure_sun_lamp / ensure_moon / ensure_sun_visual /
+# add_camera_fill_light / apply_viewport_clip so the composite path is unchanged.
+APOPHIS_ONLY_SUN_DIRECTION = (1.0, 0.0, 0.0)
+MOON_PHYSICAL_RADIUS_KM = 1737.53
+MOON_COLOR = (0.55, 0.55, 0.55, 1.0)
+SUN_BODY_RADIUS_BU = 10000.0
+SUN_COLOR = (1.0, 1.0, 1.0, 1.0)
+SUN_EMISSION_STRENGTH = 6000.0
+CAM_FILL_LIGHT_NAME = 'DEM_CamFill'
+CAM_FILL_LIGHT_TYPE = 'POINT'
+CAM_FILL_LIGHT_ENERGY = 20000.0
+VIEWPORT_CLIP_START = 0.1
+VIEWPORT_CLIP_END = 2000000.0
 # -----------------------------------------------------------------------------
 
 
@@ -54,6 +68,17 @@ def detect_solar_system(bodies_dir):
     except (ValueError, KeyError, OSError):
         return False
     return 'Earth' in names or 'Sun' in names
+
+
+def bodies_row_names(bodies_dir):
+    """Body names in the first bodies CSV ('Earth', 'Moon', ...); empty set if none."""
+    csvs = sorted(glob.glob(os.path.join(bodies_dir, '*.csv'))) if bodies_dir else []
+    if not csvs:
+        return set()
+    try:
+        return set(pd.read_csv(csvs[0], usecols=['name'])['name'].astype(str))
+    except (ValueError, KeyError, OSError):
+        return set()
 
 
 def grain_core(points_vis, fraction):
@@ -81,14 +106,32 @@ def _parent_part_to_empty(obj, empty_obj):
     obj.matrix_world = mw
 
 
-def _mesh_world_aabb_half_max_extent(obj):
-    m = obj.matrix_world
+def _world_aabb(obj, evaluated):
+    """World-space AABB; per-sphere centres on the original object's box and
+    measures the radius on the evaluated one."""
+    ev = obj
+    if evaluated:
+        try:
+            ev = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+        except RuntimeError:
+            pass
+    m = ev.matrix_world
     min_co = Vector((1e30, 1e30, 1e30))
     max_co = Vector((-1e30, -1e30, -1e30))
-    for corner in obj.bound_box:
+    for corner in ev.bound_box:
         w = m @ Vector(corner)
         min_co.x, min_co.y, min_co.z = (min(min_co[i], w[i]) for i in range(3))
         max_co.x, max_co.y, max_co.z = (max(max_co[i], w[i]) for i in range(3))
+    return min_co, max_co
+
+
+def _world_aabb_center(obj):
+    min_co, max_co = _world_aabb(obj, evaluated=False)
+    return (min_co + max_co) * 0.5
+
+
+def _mesh_world_aabb_half_max_extent(obj):
+    min_co, max_co = _world_aabb(obj, evaluated=True)
     extent = max_co - min_co
     return max(extent.x, extent.y, extent.z) * 0.5
 
@@ -131,12 +174,19 @@ def _append_earth_model(earth_empty, target_radius_bu):
         return False
 
     surf = next((o for o in mesh_objs if _object_base_name(o.name) == 'Surface'), mesh_objs[0])
+    E = earth_empty.matrix_world.translation.copy()
+    # Centre the model on the Empty via Surface's bbox centre (per-sphere
+    # import_body_model auto_center), so the Earth sits exactly where its
+    # keyframes put it even if the source .blend has it off-origin.
+    delta = E - _world_aabb_center(surf)
+    for obj in mesh_objs:
+        obj.matrix_world = mathutils.Matrix.Translation(delta) @ obj.matrix_world
+
     reference_radius = _mesh_world_aabb_half_max_extent(surf)
     if reference_radius <= 0:
         print('WARNING: measured Earth reference radius <= 0 — falling back to bare sphere.')
         return False
 
-    E = earth_empty.matrix_world.translation.copy()
     scale_factor = target_radius_bu / reference_radius
     S = (
         mathutils.Matrix.Translation(E)
@@ -214,12 +264,8 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
     if earth_empty is None:
         earth_empty = bpy.data.objects.get(EARTH_EMPTY_NAME)
     sun_lamp = bpy.data.objects.get('DEM_SunLight')
-    if sun_lamp is None and has_solar:
-        lamp_data = bpy.data.lights.new('DEM_SunLight', 'SUN')
-        lamp_data.energy = SUN_LAMP_ENERGY
-        lamp_data.angle = SUN_LAMP_ANGLE
-        sun_lamp = bpy.data.objects.new('DEM_SunLight', lamp_data)
-        bpy.context.scene.collection.objects.link(sun_lamp)
+    if sun_lamp is None:
+        sun_lamp = _new_sun_lamp()
     moon_empty = bpy.data.objects.get('Moon')
     sun_body = bpy.data.objects.get('Sun_Visual')
 
@@ -287,8 +333,12 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
     return earth_empty
 
 
-def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None):
+def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None,
+                 rotation_interp=None):
     """Keyframe a tracking camera. ``core_fn(i)`` returns the frame-``i`` aim point.
+
+    ``rotation_interp`` (e.g. 'LINEAR', what DEMGrainsBlenderEarthCam.py uses)
+    overrides the rotation keys' interpolation; None keeps Blender's default.
 
     Same time-remap hazard as keyframe_bodies_and_earth() above: this reads
     earth_empty's current (possibly time-remap-sampled) position per frame to
@@ -358,6 +408,134 @@ def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None)
         cam_obj.rotation_quaternion = q
         cam_obj.keyframe_insert(data_path='location', frame=frame)
         cam_obj.keyframe_insert(data_path='rotation_quaternion', frame=frame)
+    if rotation_interp:
+        for fc in _fcurves(cam_obj, 'rotation_quaternion'):
+            for kp in fc.keyframe_points:
+                kp.interpolation = rotation_interp
+    return cam_obj
+
+
+def _fcurves(obj, data_path):
+    """F-curves of ``obj`` for ``data_path`` (legacy action.fcurves or 4.4+ layered actions)."""
+    ad = obj.animation_data
+    action = ad.action if ad else None
+    if action is None:
+        return []
+    fcurves = list(getattr(action, 'fcurves', None) or [])
+    if not fcurves:
+        for layer in getattr(action, 'layers', []):
+            for strip in getattr(layer, 'strips', []):
+                for bag in getattr(strip, 'channelbags', []):
+                    fcurves.extend(bag.fcurves)
+    return [fc for fc in fcurves if fc.data_path == data_path]
+
+
+def _new_sun_lamp():
+    lamp_data = bpy.data.lights.new('DEM_SunLight', 'SUN')
+    lamp_data.energy = SUN_LAMP_ENERGY
+    lamp_data.angle = SUN_LAMP_ANGLE
+    lamp = bpy.data.objects.new('DEM_SunLight', lamp_data)
+    bpy.context.scene.collection.objects.link(lamp)
+    return lamp
+
+
+def ensure_sun_lamp(has_solar, bodies_dir):
+    """Sun lamp exactly as DEMGrainsBlenderEarthCam.py makes it.
+
+    Solar-system run with a Sun row: plain lamp, keyframed later by
+    keyframe_bodies_and_earth(). No Sun row (hyperbola) or apophis_only: fixed
+    APOPHIS_ONLY_SUN_DIRECTION. Solar-system run without a bodies dir: none.
+    """
+    existing = bpy.data.objects.get('DEM_SunLight')
+    if existing is not None:
+        bpy.data.objects.remove(existing, do_unlink=True)
+    bodies_ok = bool(bodies_dir) and os.path.isdir(bodies_dir)
+    if has_solar and not bodies_ok:
+        return None
+    lamp = _new_sun_lamp()
+    if not has_solar or 'Sun' not in bodies_row_names(bodies_dir):
+        sun_dir = Vector(APOPHIS_ONLY_SUN_DIRECTION).normalized()
+        lamp.rotation_euler = (-sun_dir).to_track_quat('-Z', 'Y').to_euler()
+    return lamp
+
+
+def _body_sphere(empty_name, body_name, radius_bu, material):
+    bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
+    empty = bpy.context.object
+    empty.name = empty_name
+    bpy.ops.mesh.primitive_uv_sphere_add(
+        radius=radius_bu, segments=32, ring_count=16, location=(0.0, 0.0, 0.0)
+    )
+    sphere = bpy.context.object
+    sphere.name = body_name
+    if sphere.data.materials:
+        sphere.data.materials[0] = material
+    else:
+        sphere.data.materials.append(material)
+    _parent_part_to_empty(sphere, empty)
+    return empty
+
+
+def ensure_moon(has_solar, bodies_dir):
+    """Grey Moon sphere under a 'Moon' Empty, only when the bodies CSV has a Moon row."""
+    if not has_solar or 'Moon' not in bodies_row_names(bodies_dir):
+        return None
+    if bpy.data.objects.get('Moon') is not None:
+        return bpy.data.objects['Moon']
+    mat = bpy.data.materials.get('Moon_Surface')
+    if mat is None:
+        mat = bpy.data.materials.new('Moon_Surface')
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get('Principled BSDF')
+        if bsdf:
+            bsdf.inputs['Base Color'].default_value = MOON_COLOR
+            bsdf.inputs['Roughness'].default_value = 0.95
+    return _body_sphere('Moon', 'Moon_Body', MOON_PHYSICAL_RADIUS_KM * EARTH_VIS_SCALE, mat)
+
+
+def ensure_sun_visual(has_solar, bodies_dir):
+    """Emissive Sun sphere under a 'Sun_Visual' Empty, only when the bodies CSV has a Sun row."""
+    if not has_solar or 'Sun' not in bodies_row_names(bodies_dir):
+        return None
+    if bpy.data.objects.get('Sun_Visual') is not None:
+        return bpy.data.objects['Sun_Visual']
+    mat = bpy.data.materials.get('Sun_Surface')
+    if mat is None:
+        mat = bpy.data.materials.new('Sun_Surface')
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get('Principled BSDF')
+        if bsdf:
+            bsdf.inputs['Base Color'].default_value = SUN_COLOR
+            for name, val in (('Emission Color', SUN_COLOR), ('Emission', SUN_COLOR),
+                              ('Emission Strength', SUN_EMISSION_STRENGTH)):
+                if name in bsdf.inputs:
+                    bsdf.inputs[name].default_value = val
+    return _body_sphere('Sun_Visual', 'Sun_Body', SUN_BODY_RADIUS_BU, mat)
+
+
+def add_camera_fill_light(cam_obj):
+    """Point light parented to the camera (lights the camera-facing side of Apophis)."""
+    existing = bpy.data.objects.get(CAM_FILL_LIGHT_NAME)
+    if existing is not None:
+        bpy.data.objects.remove(existing, do_unlink=True)
+    fill_data = bpy.data.lights.new(CAM_FILL_LIGHT_NAME, CAM_FILL_LIGHT_TYPE)
+    fill_data.energy = CAM_FILL_LIGHT_ENERGY
+    fill = bpy.data.objects.new(CAM_FILL_LIGHT_NAME, fill_data)
+    bpy.context.scene.collection.objects.link(fill)
+    fill.parent = cam_obj
+    return fill
+
+
+def apply_viewport_clip():
+    """Viewport clip range for km-to-BU scenes (GUI only; renders use the camera's own clip)."""
+    for screen in bpy.data.screens:
+        for area in screen.areas:
+            if area.type != 'VIEW_3D':
+                continue
+            for space in area.spaces:
+                if space.type == 'VIEW_3D':
+                    space.clip_start = VIEWPORT_CLIP_START
+                    space.clip_end = VIEWPORT_CLIP_END
 
 
 def register_self_as_auto_run_module():

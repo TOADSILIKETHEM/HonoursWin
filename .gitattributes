@@ -1,0 +1,5 @@
+# Code lives in WSL since 2026-09-25; Windows tools must not introduce CRLF.
+* text=auto eol=lf
+*.png binary
+*.blend binary
+*.exr binary
