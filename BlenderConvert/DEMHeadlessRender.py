@@ -13,7 +13,8 @@ Run with:
 Text-patches the chosen Blender script's config constants and exec()s it —
 the same technique sobol/Analysis/run_demtocsv_batch.py uses on
 DEMDumpConvert.py:
-  per_sphere -> DEMGrainsBlenderEarthCam.py  (GRAINS_DIR, BODIES_CSV_DIR, CAMERA_MODE)
+  per_sphere -> DEMGrainsBlenderEarthCam.py  (GRAINS_DIR, BODIES_CSV_DIR, CAMERA_MODE,
+                                              MAX_FRAMES)
   composite  -> DEMBulkVizBlender.py         (VIZ_MANIFEST, CAMERA_MODE)
   instance   -> DEMBulkInstanceBlender.py    (VIZ_MANIFEST, CAMERA_MODE,
                                               SLOWMO_FACTOR=1, RENDER_RESOLUTION)
@@ -76,6 +77,7 @@ _VIZ_MANIFEST_RE = r"(?m)^VIZ_MANIFEST\s*=\s*\([^)]*\)"
 _CAMERA_MODE_RE = r"(?m)^CAMERA_MODE\s*=\s*None\b"
 _SLOWMO_FACTOR_RE = r"(?m)^SLOWMO_FACTOR\s*=\s*\d+"
 _RENDER_RESOLUTION_RE = r"(?m)^RENDER_RESOLUTION\s*=\s*\([^)]*\)"
+_MAX_FRAMES_RE = r"(?m)^MAX_FRAMES\s*=\s*None\b"
 
 
 def deep_dark_space_hdri_path(script_dir=None) -> Path:
@@ -283,13 +285,22 @@ def _sub_exactly_once(pattern: str, replacement: str, src: str, label: str) -> s
 
 
 def patch_script_source(viz_path, src, *, grains_dir=None, bodies_dir=None,
-                        manifest=None, camera_mode="auto", resolution=None):
+                        manifest=None, camera_mode="auto", resolution=None, max_frames=None):
     """Return src with this path's config constants replaced. Pure — no bpy."""
     if viz_path == "per_sphere":
         src = _sub_exactly_once(_GRAINS_DIR_RE, f"GRAINS_DIR = {grains_dir!r}", src, "GRAINS_DIR")
         src = _sub_exactly_once(
             _BODIES_CSV_DIR_RE, f"BODIES_CSV_DIR = {bodies_dir!r}", src, "BODIES_CSV_DIR"
         )
+        if max_frames is not None:
+            # per_sphere keyframes every grain file up front, so the limit has
+            # to reach the builder -- clamping scene.frame_end afterwards (as
+            # main() also does) still pays for building every frame. Composite
+            # and instance load each frame lazily in frame_change_pre, so they
+            # need no equivalent.
+            src = _sub_exactly_once(
+                _MAX_FRAMES_RE, f"MAX_FRAMES = {int(max_frames)}", src, "MAX_FRAMES"
+            )
     else:
         src = _sub_exactly_once(_VIZ_MANIFEST_RE, f"VIZ_MANIFEST = {manifest!r}", src, "VIZ_MANIFEST")
     if viz_path == "instance":
@@ -330,7 +341,18 @@ def ensure_procedural_rock_material(blend_path=None) -> None:
         raise RuntimeError(f"material {ROCK_MATERIAL_NAME!r} not found in {path}")
 
 
+def _line_buffer_std_streams() -> None:
+    """Flush print() output per line. Blender's Python block-buffers stdout
+    into a pipe (and ignores PYTHONUNBUFFERED), so the TUI's render.log and
+    live status line would otherwise only see output when Blender exits."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(line_buffering=True)
+
+
 def main() -> None:
+    _line_buffer_std_streams()
     args = _parse_args()
     res_x, res_y = parse_resolution(args.resolution)
     script_dir = Path(__file__).resolve().parent
@@ -343,7 +365,11 @@ def main() -> None:
     # lands under the wrong directory -- confirmed live in v1: PNGs wrote to
     # "C:\DEMCSVs\..." until output-dir resolution was hoisted above exec.
     out_dir = Path(args.output_dir).resolve()
-    patch_kwargs = {"camera_mode": args.camera_mode, "resolution": (res_x, res_y)}
+    patch_kwargs = {
+        "camera_mode": args.camera_mode,
+        "resolution": (res_x, res_y),
+        "max_frames": args.max_frames,
+    }
     if args.viz_path == "per_sphere":
         patch_kwargs["grains_dir"] = str(Path(args.grains_dir).resolve()).replace("\\", "/") + "/"
         patch_kwargs["bodies_dir"] = str(Path(args.bodies_dir).resolve()).replace("\\", "/") + "/"
