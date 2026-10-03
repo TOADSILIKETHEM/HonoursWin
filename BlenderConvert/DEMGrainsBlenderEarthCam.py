@@ -242,6 +242,8 @@ def _grain_core(grain_path, fraction):
     """Centroid of the closest `fraction` of grains to the CoM (origin)."""
     d = np.load(grain_path)
     pts = np.column_stack([d['x_vis'], d['y_vis'], d['z_vis']])
+    if len(pts) == 0:
+        return Vector((0.0, 0.0, 0.0))  # no grains left: aim at the CoM, as the instance path does
     order = np.argsort(np.sqrt((pts * pts).sum(axis=1)), kind='stable')
     n = max(1, int(len(pts) * fraction))
     return Vector(pts[order[:n]].mean(axis=0).tolist())
@@ -803,29 +805,56 @@ if grain_col is None:
     bpy.context.scene.collection.children.link(grain_col)
 
 # ── First pass: create grain spheres ──────────────────────────────────────────
-first = np.load(grain_files[0])
-n_grains = len(first['grain_id'])
-print(f'Creating {n_grains} grain spheres from {os.path.basename(grain_files[0])} ...')
+# A grain can leave mid-run (the converter drops particle-DEM grains with
+# h <= 0, e.g. accreted onto a sink) or first appear after frame 0. Build every
+# grain that ever appears and hide it while absent -- the same rules as
+# viz/viz_preprocess_grains_instance.py, so the instancing path agrees.
+class GrainReappeared(ValueError):
+    """A grain is absent between two frames it is present in."""
 
-# One fixed orientation per grain, drawn up front so the draw order (and so
-# each grain's orientation) depends only on the seed, not on anything later.
+
+# One fixed orientation per grain. Grains draw in order of first appearance
+# (frame 0's first, each frame in its stored order) from one seeded stream, so
+# a grain's orientation depends only on the seed and the grain data.
 # Never keyframed below -- only location animates, so the rock pattern stays
 # locked to its grain instead of swimming across frames.
-if GRAIN_RANDOM_ROTATION:
-    _rot_rng   = np.random.default_rng(GRAIN_RANDOM_ROTATION_SEED)
-    grain_rots = _rot_rng.uniform(0.0, 2.0 * math.pi, size=(n_grains, 3))
-else:
-    grain_rots = np.zeros((n_grains, 3))
+_rot_rng = np.random.default_rng(GRAIN_RANDOM_ROTATION_SEED)
+grain_start  = {}   # grain id -> (radius, location, rotation) at its first frame
+grain_frames = {}   # grain id -> 0-based frame indices it is present in
+for _fi, _gf in enumerate(grain_files):
+    _d    = np.load(_gf)
+    _gids = [int(g) for g in _d['grain_id']]
+    _new  = [j for j, g in enumerate(_gids) if g not in grain_start]
+    if GRAIN_RANDOM_ROTATION:
+        _rots = _rot_rng.uniform(0.0, 2.0 * math.pi, size=(len(_new), 3))
+    else:
+        _rots = np.zeros((len(_new), 3))
+    for j, rot in zip(_new, _rots):
+        grain_start[_gids[j]] = (
+            float(_d['Reff_vis'][j]),
+            (float(_d['x_vis'][j]), float(_d['y_vis'][j]), float(_d['z_vis'][j])),
+            rot,
+        )
+    for g in _gids:
+        grain_frames.setdefault(g, []).append(_fi)
+for _gid, _frames in grain_frames.items():
+    if _frames[-1] - _frames[0] + 1 != len(_frames):
+        _missing = next(f for f in range(_frames[0], _frames[-1]) if f not in _frames)
+        raise GrainReappeared(
+            f'grain {_gid} is absent at frame {_missing:05d} but present before and after it; '
+            'each grain must be present over one run of frames'
+        )
+n_grains     = len(grain_start)
+coming_going = sorted(g for g, fr in grain_frames.items() if len(fr) != len(grain_files))
+print(f'Creating {n_grains} grain spheres over {len(grain_files)} frame(s)'
+      + (f' ({len(coming_going)} join or leave mid-run)' if coming_going else '') + ' ...')
 
-for (gid, radius, x, y, z), rot in zip(
-        zip(first['grain_id'], first['Reff_vis'],
-            first['x_vis'], first['y_vis'], first['z_vis']),
-        grain_rots):
-    name = f'DEM_Grain_{int(gid):03d}'
+for gid, (radius, loc, rot) in grain_start.items():
+    name = f'DEM_Grain_{gid:03d}'
 
     bpy.ops.mesh.primitive_uv_sphere_add(
-        radius=float(radius), segments=12, ring_count=8,
-        location=(float(x), float(y), float(z)),
+        radius=radius, segments=12, ring_count=8,
+        location=loc,
         rotation=(float(rot[0]), float(rot[1]), float(rot[2])),
     )
     obj      = bpy.context.object
@@ -917,10 +946,29 @@ for frame_num, grain_file in enumerate(grain_files, start=1):
                 )
                 sun_body_empty.keyframe_insert(data_path='location', frame=frame_num)
 
+# Grains that join or leave mid-run are hidden while absent. Constant keys
+# switch at the frame, matching the instancing path's present[floor(t)]; keys
+# go only on frame 1 and where visibility changes (presence is one run).
+for gid in coming_going:
+    obj          = bpy.data.objects[f'DEM_Grain_{gid:03d}']
+    first, last  = grain_frames[gid][0], grain_frames[gid][-1]
+    changes      = {1: first > 0}
+    if first > 0:
+        changes[first + 1] = False
+    if last < len(grain_files) - 1:
+        changes[last + 2] = True
+    for frame_num, hidden in changes.items():
+        obj.hide_render   = hidden
+        obj.hide_viewport = hidden
+        obj.keyframe_insert(data_path='hide_render', frame=frame_num)
+        obj.keyframe_insert(data_path='hide_viewport', frame=frame_num)
+    _apply_fcurve_interp(obj, 'hide_render', 'CONSTANT')
+    _apply_fcurve_interp(obj, 'hide_viewport', 'CONSTANT')
+
 # ── Third pass: smooth import F-curves ────────────────────────────────────────
 if SMOOTH_INTERPOLATION:
     print('Smoothing import F-curves ...')
-    for gid in range(n_grains):
+    for gid in grain_start:
         obj = bpy.data.objects.get(f'DEM_Grain_{gid:03d}')
         if obj:
             _smooth_fcurves(obj, 'location')

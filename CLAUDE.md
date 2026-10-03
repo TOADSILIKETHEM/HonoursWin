@@ -1,6 +1,6 @@
 # CLAUDE.md — Code (post-processing repo)
 
-PHANTOM dumps → bodies CSV + grains npz → Blender renders. Parent hub: `../CLAUDE.md`. Shared facts (layout, viz path names, D3 = composite): `../docs/SHARED_FACTS.md`. Context protocol: `../docs/AGENT_CONTEXT.md`.
+PHANTOM dumps → bodies CSV + grains npz → Blender renders; composite/instance_grains preprocess can read the dumps directly (`viz/dump_frames.py`, `viz/viz_preprocess_dump.py` = one read per dump for both). Parent hub: `../CLAUDE.md`. Shared facts (layout, viz path names, D3 = composite): `../docs/SHARED_FACTS.md`. Context protocol: `../docs/AGENT_CONTEXT.md`.
 
 ## Code vs data (since 2026-09-25)
 
@@ -47,7 +47,7 @@ docs/             BATCHES_VIZ.md (canonical datasets), PIPELINE_REFERENCE.md, BL
 
 | Script | Role |
 |--------|------|
-| `DEMGrainsBlenderEarthCam.py` | Per-sphere DEM import + Earth + camera (≤~2000 grains). "Procedural rock" from `Blenders/11.blend`, seeded per-grain rotation |
+| `DEMGrainsBlenderEarthCam.py` | Per-sphere DEM import + Earth + camera (≤~2000 grains). "Procedural rock" from `Blenders/11.blend`, seeded per-grain rotation; hides grains while absent. Parity reference; TUI default is `instance_grains` |
 | `DEMBulkVizBlender.py` | Composite (D3): envelope meshes + GN ejecta; set `VIZ_MANIFEST` |
 | `DEMBulkInstanceBlender.py` | Pure instancing, `static: true/false`; needs "Procedural rock" pre-appended; `SLOWMO_FACTOR`, `RENDER_RESOLUTION`. Real grains match per-sphere exactly (`../docs/SHARED_FACTS.md` § Visualisation paths); scene pieces from `DEMCinematicSetup.py` (`ensure_sun_lamp`/`ensure_moon`/`ensure_sun_visual`/`add_camera_fill_light`) |
 | `DEMCinematicSetup.py` | Shared Earth/Moon/Sun + camera module (imported, not run) |

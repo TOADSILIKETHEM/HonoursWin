@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Preprocess DEM grain npz files (or PHANTOM dumps) into bulk Blender viz assets."""
+"""Preprocess DEM grain frames (grains npz or PHANTOM dumps) into bulk Blender viz assets."""
 
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import sys
@@ -29,23 +28,24 @@ from viz.dem_fof import (  # noqa: E402
     main_body_mask,
 )
 from viz.envelope import build_envelope  # noqa: E402
+from viz.dump_frames import iter_grain_frames  # noqa: E402
 from viz.path_utils import manifest_relpath as _manifest_path  # noqa: E402
 
 
-def _load_grains(path: Path) -> dict:
-    d = np.load(path)
+def _grains_from(d) -> dict:
+    """Arrays _process_frame needs, from a grains npz or a dump frame's grains dict."""
     n = len(d["x_rel_km"])
     pos = np.column_stack([d["x_rel_km"], d["y_rel_km"], d["z_rel_km"]]).astype(np.float64)
     radii = d["Reff_km"].astype(np.float64)
-    mass = d["m"].astype(np.float64) if "m" in d.files else np.ones(n)
+    mass = d["m"].astype(np.float64) if "m" in d else np.ones(n)
     vel_keys = ("vx", "vy", "vz")
-    if all(k in d.files for k in vel_keys):
+    if all(k in d for k in vel_keys):
         vel = np.nan_to_num(np.column_stack([d[k] for k in vel_keys]).astype(np.float64), nan=0.0)
     else:
         vel = np.zeros((n, 3), dtype=np.float64)
     grain_id = (
         d["grain_id"].astype(np.uint32)
-        if "grain_id" in d.files
+        if "grain_id" in d
         else np.arange(n, dtype=np.uint32)
     )
     return {
@@ -162,65 +162,91 @@ def _process_frame(
     return metrics, rg_initial, envelopes, ejecta, grains
 
 
-def run_preprocess(
-    grains_dir: Path,
-    output_dir: Path,
-    *,
-    bodies_dir: Path | None = None,
-    sim_name: str | None = None,
-    run_name: str | None = None,
-    vis_scale: float = GRAIN_VIS_SCALE,
-    min_mass_frac: float = FRAGMENT_MIN_MASS_FRAC,
-    max_ejecta: int | None = EJECTA_MAX_INSTANCES,
-    envelope_method: str = "hull",
-    max_frames: int | None = None,
-) -> Path:
-    grains_dir = grains_dir.resolve()
-    output_dir = output_dir.resolve()
-    grain_files = sorted(glob.glob(str(grains_dir / "*.npz")))
-    if not grain_files:
-        raise FileNotFoundError(
-            f"No grain npz files in {grains_dir} (CSV-era folder? re-run DEMDumpConvert.py)"
-        )
+class CompositeBuilder:
+    """One composite preprocess run fed a frame at a time: add(grains) per frame, then finish().
 
-    if run_name is None:
-        name = grains_dir.name
-        run_name = name.replace("_grains_output", "") if name.endswith("_grains_output") else name
-    if sim_name is None:
-        sim_name = grains_dir.parent.name
+    run_preprocess() feeds it from one frame source; viz_preprocess_dump.py
+    feeds it alongside InstanceBuilder so each dump is read once.
+    """
 
-    env_dir = output_dir / "envelopes"
-    ej_dir = output_dir / "ejecta"
-    met_dir = output_dir / "metrics"
-    for d in (env_dir, ej_dir, met_dir):
-        d.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        output_dir: Path,
+        *,
+        grains_dir: Path | None = None,
+        run_dir: Path | None = None,
+        bodies_dir: Path | None = None,
+        sim_name: str | None = None,
+        run_name: str | None = None,
+        vis_scale: float = GRAIN_VIS_SCALE,
+        min_mass_frac: float = FRAGMENT_MIN_MASS_FRAC,
+        max_ejecta: int | None = EJECTA_MAX_INSTANCES,
+        envelope_method: str = "hull",
+    ) -> None:
+        self.output_dir = Path(output_dir).resolve()
+        self.dump_mode = run_dir is not None
+        if self.dump_mode:
+            if bodies_dir is None:
+                raise ValueError("dump mode needs bodies_dir")
+            name_dir, suffix = Path(bodies_dir).resolve(), "_bodies_output"
+        else:
+            grains_dir = Path(grains_dir).resolve()
+            name_dir, suffix = grains_dir, "_grains_output"
 
-    if max_frames is not None:
-        grain_files = grain_files[:max_frames]
+        if run_name is None:
+            name = name_dir.name
+            run_name = name.replace(suffix, "") if name.endswith(suffix) else name
+        if sim_name is None:
+            sim_name = name_dir.parent.name
+        self.grains_dir = grains_dir
+        self.bodies_dir = bodies_dir
+        self.sim_name = sim_name
+        self.run_name = run_name
+        self.vis_scale = vis_scale
+        self.min_mass_frac = min_mass_frac
+        self.max_ejecta = max_ejecta
+        self.envelope_method = envelope_method
 
-    frame_ids: list[str] = []
-    rg_initial: float | None = None
-    any_subsample = False
+        self.env_dir = self.output_dir / "envelopes"
+        self.ej_dir = self.output_dir / "ejecta"
+        self.met_dir = self.output_dir / "metrics"
+        # dump mode: DEMBulkVizBlender.py builds its tracking camera from
+        # <grains_dir>/*.npz x_vis/y_vis/z_vis only; with no grains npz we write
+        # just those (float64, so the camera is identical to the npz route).
+        self.cam_dir = self.output_dir / "grains"
+        for d in (self.env_dir, self.ej_dir, self.met_dir) + ((self.cam_dir,) if self.dump_mode else ()):
+            d.mkdir(parents=True, exist_ok=True)
+        if self.dump_mode:
+            for old in self.cam_dir.glob("*.npz"):
+                old.unlink()
 
-    for i, grain_path in enumerate(grain_files):
+        self.frame_ids: list[str] = []
+        self.rg_initial: float | None = None
+        self.any_subsample = False
+
+    def add(self, d) -> None:
+        i = len(self.frame_ids)
         frame_id = f"{i:05d}"
-        frame_ids.append(frame_id)
-        grains = _load_grains(Path(grain_path))
-        metrics, rg_initial, envelopes, ejecta, _ = _process_frame(
+        self.frame_ids.append(frame_id)
+        grains = _grains_from(d)
+        if self.dump_mode:
+            np.savez(self.cam_dir / f"{frame_id}.npz",
+                     x_vis=np.asarray(d["x_vis"]), y_vis=np.asarray(d["y_vis"]), z_vis=np.asarray(d["z_vis"]))
+        metrics, self.rg_initial, envelopes, ejecta, _ = _process_frame(
             grains,
-            rg_initial,
-            vis_scale=vis_scale,
-            min_mass_frac=min_mass_frac,
-            max_ejecta=max_ejecta,
-            envelope_method=envelope_method,
+            self.rg_initial,
+            vis_scale=self.vis_scale,
+            min_mass_frac=self.min_mass_frac,
+            max_ejecta=self.max_ejecta,
+            envelope_method=self.envelope_method,
             frame_seed=i,
         )
         if metrics.get("ejecta_subsampled"):
-            any_subsample = True
+            self.any_subsample = True
 
         for env in envelopes:
             fid = int(env["fragment_id"])
-            out = env_dir / f"{frame_id}_f{fid}.npz"
+            out = self.env_dir / f"{frame_id}_f{fid}.npz"
             np.savez_compressed(
                 out,
                 verts=env["verts"],
@@ -231,12 +257,12 @@ def run_preprocess(
             )
 
         np.savez_compressed(
-            ej_dir / f"{frame_id}.npz",
+            self.ej_dir / f"{frame_id}.npz",
             pos=ejecta["pos"],
             radius=ejecta["radius"],
             grain_id=ejecta["grain_id"],
         )
-        with open(met_dir / f"{frame_id}.json", "w", encoding="utf-8") as fh:
+        with open(self.met_dir / f"{frame_id}.json", "w", encoding="utf-8") as fh:
             json.dump(metrics, fh, indent=2)
 
         print(
@@ -245,41 +271,70 @@ def run_preprocess(
             f"unbound={metrics['unbound_fraction']:.3f}"
         )
 
-    # Relative to output_dir so the manifest survives an --output-dir that is
-    # not a sibling of the grains/bodies folders; os.path.relpath (not Path.relative_to)
-    # because it can walk up out of output_dir.
-    bodies_path = (
-        bodies_dir.resolve() if bodies_dir else grains_dir.parent / f"{run_name}_bodies_output"
+    def finish(self) -> Path:
+        # Relative to output_dir so the manifest survives an --output-dir that is
+        # not a sibling of the grains/bodies folders; os.path.relpath (not Path.relative_to)
+        # because it can walk up out of output_dir.
+        bodies_path = (
+            Path(self.bodies_dir).resolve() if self.bodies_dir
+            else self.grains_dir.parent / f"{self.run_name}_bodies_output"
+        )
+        rel_bodies = _manifest_path(bodies_path, self.output_dir)
+        rel_grains = _manifest_path(self.cam_dir if self.dump_mode else self.grains_dir, self.output_dir)
+        manifest = {
+            "schema_version": 1,
+            "viz_mode": "composite",
+            "sim_name": self.sim_name,
+            "run_name": self.run_name,
+            "grain_vis_scale": self.vis_scale,
+            "n_frames": len(self.frame_ids),
+            "frame_ids": self.frame_ids,
+            "fragment_min_mass_frac": self.min_mass_frac,
+            "ejecta_max_instances": self.max_ejecta,
+            "envelope_method": self.envelope_method,
+            "input_mode": "dump" if self.dump_mode else "npz",
+            "bodies_csv_dir": rel_bodies,
+            "grains_dir": rel_grains,
+            "ejecta_subsampled": self.any_subsample,
+        }
+        manifest_path = self.output_dir / "manifest.json"
+        with open(manifest_path, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=2)
+
+        print(f"Wrote manifest -> {manifest_path}")
+        return manifest_path
+
+
+def run_preprocess(
+    grains_dir: Path | None,
+    output_dir: Path,
+    *,
+    run_dir: Path | None = None,
+    bodies_dir: Path | None = None,
+    sim_name: str | None = None,
+    run_name: str | None = None,
+    vis_scale: float = GRAIN_VIS_SCALE,
+    min_mass_frac: float = FRAGMENT_MIN_MASS_FRAC,
+    max_ejecta: int | None = EJECTA_MAX_INSTANCES,
+    envelope_method: str = "hull",
+    max_frames: int | None = None,
+) -> Path:
+    """npz mode reads ``grains_dir``; dump mode (``run_dir``) reads PHANTOM dumps and writes ``bodies_dir``."""
+    b = CompositeBuilder(
+        output_dir, grains_dir=None if run_dir is not None else grains_dir, run_dir=run_dir,
+        bodies_dir=bodies_dir, sim_name=sim_name, run_name=run_name, vis_scale=vis_scale,
+        min_mass_frac=min_mass_frac, max_ejecta=max_ejecta, envelope_method=envelope_method,
     )
-    rel_bodies = _manifest_path(bodies_path, output_dir)
-    rel_grains = _manifest_path(grains_dir, output_dir)
-    manifest = {
-        "schema_version": 1,
-        "viz_mode": "composite",
-        "sim_name": sim_name,
-        "run_name": run_name,
-        "grain_vis_scale": vis_scale,
-        "n_frames": len(frame_ids),
-        "frame_ids": frame_ids,
-        "fragment_min_mass_frac": min_mass_frac,
-        "ejecta_max_instances": max_ejecta,
-        "envelope_method": envelope_method,
-        "input_mode": "npz",
-        "bodies_csv_dir": rel_bodies,
-        "grains_dir": rel_grains,
-        "ejecta_subsampled": any_subsample,
-    }
-    manifest_path = output_dir / "manifest.json"
-    with open(manifest_path, "w", encoding="utf-8") as fh:
-        json.dump(manifest, fh, indent=2)
-
-    print(f"Wrote manifest -> {manifest_path}")
-    return manifest_path
+    for _name, d in iter_grain_frames(
+        grains_dir=b.grains_dir, run_dir=run_dir, bodies_dir=bodies_dir, max_frames=max_frames,
+    ):
+        b.add(d)
+    return b.finish()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--grains-dir", type=Path, required=True, help="run_XXXX_grains_output/")
+    p.add_argument("--grains-dir", type=Path, default=None, help="run_XXXX_grains_output/ (npz mode)")
     p.add_argument("--output-dir", type=Path, required=True, help="run_XXXX_viz/")
     p.add_argument("--bodies-dir", type=Path, default=None, help="run_XXXX_bodies_output/")
     p.add_argument("--sim-name", type=str, default=None)
@@ -298,19 +353,23 @@ def main() -> int:
         "--input-mode",
         choices=("npz", "dump"),
         default="npz",
-        help="npz = DEMDumpConvert.py grain files; dump mode reserved for P4 (not implemented yet)",
+        help="npz = DEMDumpConvert.py grain files (--grains-dir); "
+             "dump = PHANTOM dumps (--run-dir, needs --bodies-dir), no grains npz",
     )
-    p.add_argument("--dump-dir", type=Path, default=None)
-    args = p.parse_args()
+    p.add_argument("--run-dir", type=Path, default=None, help="PHANTOM run dir with sobol_* dumps")
+    args = p.parse_args(argv)
 
-    if args.input_mode == "dump":
-        print("[ERROR] --input-mode dump is P4 (Objective 2 gate); use grain npz files for P0–P3.", file=sys.stderr)
-        return 1
+    if args.input_mode == "npz" and args.grains_dir is None:
+        p.error("--input-mode npz needs --grains-dir")
+    if args.input_mode == "dump" and (args.run_dir is None or args.bodies_dir is None):
+        p.error("--input-mode dump needs --run-dir and --bodies-dir")
 
-    print(f"viz_preprocess: {args.grains_dir} -> {args.output_dir}")
+    src = args.run_dir if args.input_mode == "dump" else args.grains_dir
+    print(f"viz_preprocess ({args.input_mode}): {src} -> {args.output_dir}")
     run_preprocess(
-        args.grains_dir,
+        args.grains_dir if args.input_mode == "npz" else None,
         args.output_dir,
+        run_dir=args.run_dir if args.input_mode == "dump" else None,
         bodies_dir=args.bodies_dir,
         sim_name=args.sim_name,
         run_name=args.run_name,

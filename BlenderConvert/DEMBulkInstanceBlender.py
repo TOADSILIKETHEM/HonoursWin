@@ -211,7 +211,7 @@ def _instance_rock_material(src):
     return mat
 
 
-def _build_point_cloud(pos, grain_radius_vis, radii=None, rots=None):
+def _build_point_cloud(pos, grain_radius_vis, radii=None, rots=None, present=None):
     """Point-cloud mesh + shared grain mesh + GN 'Instance on Points', via P0_InstancingSpike.
 
     ``radii`` (float32, one per point) sets each instance's radius -- used by
@@ -220,6 +220,9 @@ def _build_point_cloud(pos, grain_radius_vis, radii=None, rots=None):
     ``grain_radius_vis`` (static placeholder and synthetic manifests).
     ``rots`` (float32 Euler XYZ, one per point) fixes each instance's
     orientation to the per-sphere path's; without it GN draws random ones.
+    ``present`` (bool, one per point) marks the grains in the current frame;
+    when given it drives Instance on Points' Selection so absent grains are not
+    drawn. Without it every point is drawn.
     """
     n_points = len(pos)
     mesh = bpy.data.meshes.new('DEM_InstancePoints_mesh')
@@ -241,6 +244,11 @@ def _build_point_cloud(pos, grain_radius_vis, radii=None, rots=None):
             raise ValueError(f'rots has shape {rot_values.shape}, expected ({n_points}, 3)')
         rot_attr = mesh.attributes.new(ROT_ATTR, 'FLOAT_VECTOR', 'POINT')
         rot_attr.data.foreach_set('vector', rot_values.ravel())
+    if present is not None:
+        present_values = np.ascontiguousarray(present, dtype=bool)
+        if len(present_values) != n_points:
+            raise ValueError(f'present has {len(present_values)} entries, pos has {n_points}')
+        mesh.attributes.new(PRESENT_ATTR, 'BOOLEAN', 'POINT').data.foreach_set('value', present_values)
 
     point_obj = bpy.data.objects.new('DEM_InstancePoints', mesh)
     bpy.context.scene.collection.objects.link(point_obj)
@@ -259,6 +267,8 @@ def _build_point_cloud(pos, grain_radius_vis, radii=None, rots=None):
         _add_attribute_rotation(group)
     else:
         _add_random_rotation(group)
+    if present is not None:
+        _add_attribute_selection(group)
     return point_obj, group
 
 
@@ -273,6 +283,20 @@ def _add_attribute_rotation(group):
     n_rot.inputs['Name'].default_value = ROT_ATTR
     n_rot.location = (n_iop.location.x - 300, n_iop.location.y + 200)
     group.links.new(n_rot.outputs['Attribute'], n_iop.inputs['Rotation'])
+
+
+PRESENT_ATTR = 'present'
+
+
+def _add_attribute_selection(group):
+    """Wire the per-point ``present`` attribute into Instance on Points' Selection:
+    grains absent from the current frame get no instance."""
+    n_iop = next(n for n in group.nodes if n.bl_idname == 'GeometryNodeInstanceOnPoints')
+    n_sel = group.nodes.new('GeometryNodeInputNamedAttribute')
+    n_sel.data_type = 'BOOLEAN'
+    n_sel.inputs['Name'].default_value = PRESENT_ATTR
+    n_sel.location = (n_iop.location.x - 300, n_iop.location.y + 400)
+    group.links.new(n_sel.outputs['Attribute'], n_iop.inputs['Selection'])
 
 
 def _add_random_rotation(group):
@@ -310,14 +334,16 @@ def _key_index(scene):
 
 
 def _load_key(k):
-    """(pos, handle) float64 arrays for real frame ``k`` (cached, 4 frames)."""
+    """(pos, handle, present) for real frame ``k`` (cached, 4 frames); present is None
+    for points files written before it existed."""
     st = _viz_state
     cache = st['frames']
     if k in cache:
         cache.move_to_end(k)
         return cache[k]
     d = np.load(_points_path_for_frame(st['viz_dir'], st['manifest'], k))
-    entry = (d['pos'].astype(np.float64), d['handle'].astype(np.float64))
+    present = np.ascontiguousarray(d['present'], dtype=bool) if 'present' in d.files else None
+    entry = (d['pos'].astype(np.float64), d['handle'].astype(np.float64), present)
     cache[k] = entry
     if len(cache) > 4:
         cache.popitem(last=False)
@@ -331,11 +357,11 @@ def bezier_points(idx):
     n = len(_viz_state['manifest']['frame_ids'])
     idx = min(max(float(idx), 0.0), float(n - 1))
     k = int(np.floor(idx))
-    y0, h0 = _load_key(k)
+    y0, h0, _ = _load_key(k)
     t = idx - k
     if k >= n - 1 or t == 0.0:
         return y0
-    y1, h1 = _load_key(k + 1)
+    y1, h1, _ = _load_key(k + 1)
     return bezier_evaluate(y0, h0, y1, h1, t)
 
 
@@ -374,6 +400,11 @@ def _instance_frame_change_handler(scene):
             return
         pos = bezier_points(frac_idx).astype(np.float32)
         mesh.vertices.foreach_set('co', pos.ravel())
+        # Visible iff present at the last real frame at or before this time,
+        # like per-sphere's constant hide_render keys.
+        present = _load_key(int(np.floor(frac_idx)))[2]
+        if present is not None:
+            mesh.attributes[PRESENT_ATTR].data.foreach_set('value', present)
         mesh.update()
         st['loaded_frame'] = frac_idx
         return
@@ -464,8 +495,9 @@ def main():
     # handler keeps updating only 'co'.
     radii = first_points['radius'] if 'radius' in first_points.files else None
     rots = first_points['rot'] if 'rot' in first_points.files else None
+    present = first_points['present'] if 'present' in first_points.files else None
     point_obj, _group = _build_point_cloud(
-        pos, manifest['grain_radius_vis'], radii=radii, rots=rots
+        pos, manifest['grain_radius_vis'], radii=radii, rots=rots, present=present
     )
     bezier = (
         not static
@@ -510,8 +542,10 @@ def main():
             def _core_fn(i):
                 if static:
                     return Vector((0.0, 0.0, 0.0))  # static placeholder, centred on Apophis CoM
-                # Per-sphere camera: centroid of the innermost CORE_GRAIN_FRACTION grains.
-                pts = np.load(_points_path_for_frame(viz_dir, manifest, i))['pos']
+                # Per-sphere camera: centroid of the innermost CORE_GRAIN_FRACTION of
+                # the grains present in that frame (absent slots hold stale positions).
+                d = np.load(_points_path_for_frame(viz_dir, manifest, i))
+                pts = d['pos'][d['present']] if 'present' in d.files else d['pos']
                 return cinematic.grain_core(pts.astype(np.float64), CORE_GRAIN_FRACTION)
             cam_obj = cinematic.setup_camera(
                 len(frame_ids), _core_fn, earth_empty, has_solar, camera_mode=CAMERA_MODE,
