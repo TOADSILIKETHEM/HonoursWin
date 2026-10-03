@@ -106,7 +106,7 @@ With `np_apophis=500` on the bilobed shape, d_particle ≈ 46 m ≈ 4600 cm. Con
 
 ### Disruption Metrics
 
-**`dispersion_ratio`** — peak-over-run radius of gyration of the DEM grains ÷ initial value.
+**`size_ratio`** — peak-over-run radius of gyration of the DEM grains ÷ initial value.
 - ~1.0: intact
 - 1.1–1.3: geometric spreading / tidal deformation
 - >>1: breakup / mass ejection in progress
@@ -115,7 +115,7 @@ With `np_apophis=500` on the bilobed shape, d_particle ≈ 46 m ≈ 4600 cm. Con
 - 0: all grains gravitationally bound (may still be deformed)
 - >0: mass loss / true disruption
 
-**Critical thesis distinction:** `unbound_fraction = 0` does not mean nothing happened. In the `flyby_spin_earth` campaign, `dispersion_ratio` reaches 1.24 at the fastest tested spin (2.07 hr) while `unbound_fraction = 0` throughout — the body deforms and spreads tidally but no mass escapes. Thesis wording must distinguish **geometric spreading** from **unbound disruption**.
+**Critical thesis distinction:** `unbound_fraction = 0` does not mean nothing happened. In the `flyby_spin_earth` campaign, `size_ratio` reaches 1.24 at the fastest tested spin (2.07 hr) while `unbound_fraction = 0` throughout — the body deforms and spreads tidally but no mass escapes. Thesis wording must distinguish **geometric spreading** from **unbound disruption**.
 
 ### Spin Period Metrics
 
@@ -151,7 +151,7 @@ All batches are under `Honours/sobol_mass_runs/` in WSL.
 ### `sobol_20260531_172510_flyby_spin_earth`
 - **Setup:** Earth present, kc=0, spin swept 2–4 hr (Sobol), 16 runs, `np_apophis=500`.
 - **Purpose:** Map how tidal + spin effects combine at elevated spin rates.
-- **Result:** Dispersion rises below ~2.5–2.6 hr spin (peak disp=1.24 at 2.07 hr). CA flat across all runs. Unbound fraction = 0 throughout.
+- **Result:** Size ratio rises below ~2.5–2.6 hr spin (peak size ratio=1.24 at 2.07 hr). CA flat across all runs. Unbound fraction = 0 throughout.
 - **Spin range justification:** Spins 2–4 hr sit above the ~2 hr no-Earth catastrophic threshold. Spins below ~2 hr were excluded because they disrupt independently and would confound Earth-attribution.
 - **Thesis note:** This shows **tidal deformation** (not disruption) increases near the spin-modified boundary. The Earth-attribution claim requires Priority 2 (same spins, no Earth, matched `tmax`) to confirm what is tidal vs what is spin-only.
 
@@ -189,7 +189,7 @@ All batches are under `Honours/sobol_mass_runs/` in WSL.
 ### Priority 2 — No-Earth Control (matched `tmax`)
 - **Setup:** No Earth (`apophis_only=T`), same spin range as `flyby_spin_earth` (2–4 hr), kc=0, **4.5-day `tmax`** (matching flyby batch).
 - **Purpose:** Provide the Earth-absent control at matched simulation time. The difference between `flyby_spin_earth` and Priority 2 curves isolates the **tidal contribution to the disruption boundary**.
-- **Planned thesis figure:** `dispersion_ratio` vs `apophis_spin_period` with two curves: Earth present vs Earth absent. The horizontal offset between the curves is Earth's tidal effect.
+- **Planned thesis figure:** `size_ratio` vs `apophis_spin_period` with two curves: Earth present vs Earth absent. The horizontal offset between the curves is Earth's tidal effect.
 
 ### Priority 3 — 2D Spin × kc Map
 - **Setup:** Earth present, spin ~1–3 hr, kc varies.
@@ -214,7 +214,7 @@ All batches are under `Honours/sobol_mass_runs/` in WSL.
 
 **Response variables of interest:**
 - `closest_approach_km` / `closest_approach_au` — orbital metric
-- `dispersion_ratio` — structural integrity
+- `size_ratio` — structural integrity
 - `unbound_fraction` — true mass-loss disruption
 - `settled_spin_period_hr` / `post_flyby_spin_period_hr` — tidal spin change
 
@@ -265,7 +265,7 @@ The torque-align campaign established a strong orientation dependence: the "oppo
 S_kc ≈ 0 is not a failure. At real 30 hr spin, the body is ~15× slower than the ~2 hr spin disruption threshold. Cohesion cannot matter for an outcome that spin stability already guarantees. The null result is physically meaningful: it confirms that at real Apophis conditions, cohesion is not the relevant parameter — spin is.
 
 **On `unbound_fraction = 0` in `flyby_spin_earth`:**
-The body deforms and spreads (dispersion_ratio up to 1.24) without any mass escaping. This is tidal distortion of a bound body, not disruption. Thesis wording: "tidal deformation" or "geometric spreading", not "disruption" or "breakup" for this campaign.
+The body deforms and spreads (size_ratio up to 1.24) without any mass escaping. This is tidal distortion of a bound body, not disruption. Thesis wording: "tidal deformation" or "geometric spreading", not "disruption" or "breakup" for this campaign.
 
 **On the torque-align breakup (OBJ case):**
 run_0002 (opposite spin, 177.5°) reaches disp≈54 and unbound≈0.93 — near-total disruption. This is the most dramatic result in the dataset and is suitable for a thesis figure / animation showing grain dispersal.

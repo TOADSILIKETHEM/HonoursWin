@@ -15,7 +15,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
 from viz.constants import (
-    MAIN_BODY_INTACT_DISP_RATIO,
+    MAIN_BODY_INTACT_SIZE_RATIO,
     MAIN_BODY_LINK_FACTOR_INIT,
     MAIN_BODY_LINK_FACTOR_MAX,
     MAIN_BODY_MIN_CLUSTER_FRAC,
@@ -91,7 +91,7 @@ def main_body_mask(
     n = len(b_pos)
     if n < 2:
         return np.ones(n, dtype=bool)
-    if rg_ratio is not None and rg_ratio < MAIN_BODY_INTACT_DISP_RATIO:
+    if rg_ratio is not None and rg_ratio < MAIN_BODY_INTACT_SIZE_RATIO:
         return np.ones(n, dtype=bool)
     return main_body_mask_fof_adaptive(b_pos, b_mass)
 
@@ -124,7 +124,7 @@ def significant_fragment_masks(
     n = len(mass)
     if n == 0:
         return []
-    if rg_ratio is not None and rg_ratio < MAIN_BODY_INTACT_DISP_RATIO:
+    if rg_ratio is not None and rg_ratio < MAIN_BODY_INTACT_SIZE_RATIO:
         return [np.ones(n, dtype=bool)]
 
     m_tot = float(mass.sum())
@@ -228,7 +228,7 @@ def assign_fragments_and_ejecta(
     if n == 0:
         return [], np.array([], dtype=bool), np.array([], dtype=np.int32)
 
-    if rg_ratio < MAIN_BODY_INTACT_DISP_RATIO:
+    if rg_ratio < MAIN_BODY_INTACT_SIZE_RATIO:
         all_mask = np.ones(n, dtype=bool)
         energy = high_energy_mask_in_cluster(pos, mass, vel, all_mask)
         fragment_masks = [all_mask & ~energy] if (all_mask & ~energy).any() else [all_mask]
