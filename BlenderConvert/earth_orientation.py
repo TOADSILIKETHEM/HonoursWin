@@ -118,3 +118,29 @@ def ecliptic_to_geographic(vec, time_s, epoch=DEFAULT_EPOCH_TDB, frame_rotation_
     lon = math.degrees(math.atan2(by, bx))
     lat = math.degrees(math.atan2(bz, math.hypot(bx, by)))
     return lon, lat
+
+
+class SpinStepCheck:
+    """Watches the gaps between Earth spin keys. Blender interpolates quaternion
+    keys per component; with the unwrapped GMST above that still turns forward
+    up to 360 deg per key (unevenly past ~180 deg) and backwards beyond it.
+    ``warning`` returns at most one message per run, for the first bad gap."""
+
+    UNEVEN_DEG = 180.0
+
+    def __init__(self):
+        self._prev = None
+        self._warned = False
+
+    def warning(self, time_s, frame):
+        prev, self._prev = self._prev, time_s
+        if prev is None or self._warned:
+            return None
+        step = abs(time_s - prev) / EARTH_SIDEREAL_DAY_S * 360.0
+        if step <= self.UNEVEN_DEG:
+            return None
+        self._warned = True
+        how = ('runs backwards (> 360 deg per key)' if step > 360.0
+               else 'turns unevenly (> 180 deg per key)')
+        return (f'WARNING: Earth spins {step:.0f} deg between keys at frame {frame}; '
+                f'the interpolated spin {how}. Later gaps not reported.')

@@ -12,6 +12,7 @@ host_path() turns one into what the current interpreter can open.
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 CONFIG_NAME = "local_paths.json"
@@ -36,6 +37,8 @@ _ENV = {
 }
 _DEVICES = ("gpu", "cpu")
 _MNT_DRIVE_RE = re.compile(r"^/mnt/([a-zA-Z])(/.*)?$")
+_WIN_DRIVE_RE = re.compile(r"^([a-zA-Z]):[\\/](.*)$")
+_PATH_KEYS = ("data_dir", "assets_dir", "blender_exe", "preprocess_python")
 
 _cache = None
 
@@ -77,6 +80,9 @@ def load(reload: bool = False) -> dict:
     for key, var in _ENV.items():
         if os.environ.get(var):
             cfg[key] = os.environ[var]
+    if os.name != "nt":  # "C:/x" as typed on a Windows-minded machine -> /mnt/c/x for WSL python
+        for key in _PATH_KEYS:
+            cfg[key] = _from_windows_drive(cfg[key])
     cfg["data_dir"] = cfg["data_dir"].rstrip("/\\")
     if cfg["assets_dir"] is None:
         cfg["assets_dir"] = cfg["data_dir"] + "/BlenderConvert"
@@ -87,6 +93,13 @@ def load(reload: bool = False) -> dict:
         raise ConfigError(f"{path}: cycles_device must be one of {_DEVICES}, got {cfg['cycles_device']!r}")
     _cache = cfg
     return cfg
+
+
+def _from_windows_drive(p):
+    m = _WIN_DRIVE_RE.match(p) if isinstance(p, str) else None
+    if not m:
+        return p
+    return f"/mnt/{m.group(1).lower()}/" + m.group(2).replace("\\", "/")
 
 
 def data_dir() -> str:
@@ -126,6 +139,7 @@ def to_windows_path(p, distro=None) -> str:
     m = _MNT_DRIVE_RE.match(s)
     if m:
         return f"{m.group(1).upper()}:{m.group(2) or '/'}"
+    # env read here too, not only via load(): load() is cached, so a later env change would be missed
     distro = distro or os.environ.get("WSL_DISTRO_NAME") or load()["wsl_distro"]
     return "\\\\wsl.localhost\\" + distro + s.replace("/", "\\")
 
@@ -135,10 +149,21 @@ def host_path(p) -> str:
     return to_windows_path(p) if os.name == "nt" else str(p)
 
 
+def is_windows_tool(exe) -> bool:
+    """A Windows .exe launched from a POSIX host (WSL): needs Windows-form paths
+    and WSLENV-forwarded env vars, and can't follow WSL symlinks."""
+    return os.name != "nt" and str(exe).lower().endswith(".exe")
+
+
+def exe_available(exe) -> bool:
+    """A path to an existing file, or a bare name found on PATH."""
+    return Path(exe).is_file() or shutil.which(str(exe)) is not None
+
+
 def tool_path(p, exe) -> str:
     """Path argument for a child process: Windows form only when a POSIX host
     (WSL) launches a Windows .exe; native tools get the path unchanged."""
-    if os.name != "nt" and str(exe).lower().endswith(".exe"):
+    if is_windows_tool(exe):
         return to_windows_path(p)
     return str(p)
 
@@ -158,7 +183,7 @@ def child_env(exe, environ=None):
     """Env for launching exe, or None (= inherit unchanged). Only a Windows .exe
     started from a POSIX host (WSL) needs HONOURS_* overrides listed in WSLENV."""
     environ = dict(os.environ if environ is None else environ)
-    if os.name == "nt" or not str(exe).lower().endswith(".exe"):
+    if not is_windows_tool(exe):
         return None
     # /p only for a WSL path: it mangles one already in Windows form (D:/x -> D;\\wsl...)
     wanted = [k + (flag if environ[k].startswith("/") else "")

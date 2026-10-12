@@ -281,7 +281,7 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
     if n == 0:
         return earth_empty
 
-    spin_t_prev = None
+    spin_check = earth_orientation.SpinStepCheck()
     spin_logged = False
 
     for i in range(n):
@@ -309,9 +309,9 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
                     else:
                         print('Earth time-of-day: arbitrary (no Sun row, e.g. hyperbola); '
                               'spin rate still sidereal.')
-                if spin_t_prev is not None:
-                    _warn_spin_step(t_s - spin_t_prev, frame)
-                spin_t_prev = t_s
+                warning = spin_check.warning(t_s, frame)
+                if warning:
+                    print(warning)
                 q = mathutils.Quaternion(earth_orientation.earth_quaternion(t_s, EARTH_EPOCH_TDB))
                 for child in earth_empty.children_recursive:
                     if child.name.startswith('Surface') or child.name.startswith('Clouds'):
@@ -346,15 +346,6 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
             sun_body.keyframe_insert(data_path='location', frame=frame)
 
     return earth_empty
-
-
-def _warn_spin_step(dt_s, frame):
-    """Quaternion keys interpolate the short way round: > 180 deg of spin per
-    frame reverses the apparent direction, so warn well before that."""
-    step_deg = abs(dt_s) / earth_orientation.EARTH_SIDEREAL_DAY_S * 360.0
-    if step_deg > 90.0:
-        print(f'WARNING: Earth spins {step_deg:.0f} deg between keys at frame {frame}; '
-              'interpolated spin will look wrong (> 180 deg reverses).')
 
 
 def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None,

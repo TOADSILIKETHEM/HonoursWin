@@ -712,11 +712,22 @@ if _has_solar_system and _bodies_available and EARTH_MODEL_PATH and os.path.exis
     earth_empty      = bpy.context.object
     earth_empty.name = EARTH_EMPTY_NAME
     import_body_model(earth_empty, earth_cfg, EARTH_PHYSICAL_RADIUS_KM * EARTH_VIS_SCALE)
-elif EARTH_MODEL_PATH and not os.path.exists(EARTH_MODEL_PATH):
-    print(f'WARNING: EARTH_MODEL_PATH not found ({EARTH_MODEL_PATH}) — Earth skipped.')
+elif _has_solar_system and _bodies_available:
+    # same fallback as DEMCinematicSetup.ensure_earth_placeholder (shared pack has no .blend)
+    print(f'WARNING: EARTH_MODEL_PATH not found ({EARTH_MODEL_PATH}) — falling back to bare sphere.')
+    bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0.0, 0.0, 0.0))
+    earth_empty      = bpy.context.object
+    earth_empty.name = EARTH_EMPTY_NAME
+    bpy.ops.mesh.primitive_uv_sphere_add(
+        radius=EARTH_PHYSICAL_RADIUS_KM * EARTH_VIS_SCALE, segments=32, ring_count=16,
+        location=(0.0, 0.0, 0.0))
+    _surf      = bpy.context.object
+    _surf.name = 'Surface'
+    _parent_part_to_empty(_surf, earth_empty)
 
 _earth_spin_objs = []
-_earth_spin_t_prev = None
+_earth_spin_check = earth_orientation.SpinStepCheck()
+_earth_spin_logged = False
 if earth_empty is not None:
     for _obj in earth_empty.children_recursive:
         _base = _object_base_name(_obj.name)
@@ -947,17 +958,19 @@ for frame_num, grain_file in enumerate(grain_files, start=1):
                 )
                 earth_empty.keyframe_insert(data_path='location', frame=frame_num)
 
-            if _earth_spin_objs:
-                time_s_val = float(bdf['time_s'].iloc[0]) if 'time_s' in bdf.columns else 0.0
-                if _earth_spin_t_prev is None:
+            if _earth_spin_objs and 'time_s' not in bdf.columns:
+                if not _earth_spin_logged:
+                    _earth_spin_logged = True
+                    print('Earth spin off: bodies CSV has no time_s column.')
+            elif _earth_spin_objs:
+                time_s_val = float(bdf['time_s'].iloc[0])
+                if not _earth_spin_logged:
+                    _earth_spin_logged = True
                     print(f'Earth time-of-day: epoch {EARTH_EPOCH_TDB} TDB + time_s.' if not sun_row.empty
                           else 'Earth time-of-day: arbitrary (no Sun row, e.g. hyperbola); spin rate still sidereal.')
-                else:
-                    _step_deg = abs(time_s_val - _earth_spin_t_prev) / earth_orientation.EARTH_SIDEREAL_DAY_S * 360.0
-                    if _step_deg > 90.0:
-                        print(f'WARNING: Earth spins {_step_deg:.0f} deg between keys at frame {frame_num}; '
-                              'interpolated spin will look wrong (> 180 deg reverses).')
-                _earth_spin_t_prev = time_s_val
+                _warning = _earth_spin_check.warning(time_s_val, frame_num)
+                if _warning:
+                    print(_warning)
                 q = mathutils.Quaternion(earth_orientation.earth_quaternion(time_s_val, EARTH_EPOCH_TDB))
                 for _obj in _earth_spin_objs:
                     _obj.rotation_quaternion = q

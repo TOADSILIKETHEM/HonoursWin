@@ -8,7 +8,7 @@ Run with:
         [--manifest PATH/manifest.json]            (composite / instance) \\
         [--resolution 1920x1080] [--samples 500] [--fps 24] \\
         [--max-frames N] [--camera-mode auto|grain_only] \\
-        [--encode-video] [--video-fps N]
+        [--device gpu|cpu] [--encode-video] [--video-fps N]
 
 Text-patches the chosen Blender script's config constants and exec()s it —
 the same technique sobol/Analysis/run_demtocsv_batch.py uses on
@@ -19,7 +19,9 @@ DEMDumpConvert.py:
   instance   -> DEMBulkInstanceBlender.py    (VIZ_MANIFEST, CAMERA_MODE,
                                               SLOWMO_FACTOR=1, RENDER_RESOLUTION)
 Then applies World "Deep Dark Space with Stars.001" (same HDRI as
-Apophisonly.blend), sets Cycles to OPTIX (else CUDA) GPU-only, and renders.
+Apophisonly.blend), sets Cycles to the first GPU backend found (OPTIX, CUDA,
+HIP, ONEAPI, METAL; GPU only, no CPU hybrid) or, with --device cpu, the CPU,
+and renders. --device defaults to cycles_device in Code/local_paths.json.
 
 With --encode-video, the just-rendered frame_*.png sequence is combined
 into an MP4 (H264) via Blender's own VSE-scripted ffmpeg (no separate
@@ -297,6 +299,11 @@ def encode_video(out_dir: Path, n_frames: int, fps: int, video_name: str = "anim
     return video_path
 
 
+def render_banner(viz_path, frame_start, frame_end, res_x, res_y, samples, device, out_dir) -> str:
+    return (f"[DEMHeadlessRender] Rendering {viz_path} frames {frame_start}-{frame_end} "
+            f"at {res_x}x{res_y}, {samples} samples, {device.upper()}, to {out_dir}")
+
+
 def validate_args(args) -> None:
     """Cross-flag rules argparse can't express. Raises ValueError."""
     if args.viz_path == "per_sphere":
@@ -503,10 +510,8 @@ def main() -> None:
     scene.render.image_settings.file_format = 'PNG'
     scene.render.filepath = str(out_dir) + "/frame_"
 
-    print(
-        f"[DEMHeadlessRender] Rendering {args.viz_path} frames {scene.frame_start}-{scene.frame_end} "
-        f"at {res_x}x{res_y}, {args.samples} samples, GPU, to {out_dir}"
-    )
+    print(render_banner(args.viz_path, scene.frame_start, scene.frame_end, res_x, res_y,
+                        args.samples, args.device, out_dir))
     bpy.ops.render.render(animation=True)
     n_frames = scene.frame_end - scene.frame_start + 1
     print(f"[DEMHeadlessRender] Done — {n_frames} frame(s) written to {out_dir}")
