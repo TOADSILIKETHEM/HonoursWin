@@ -14,6 +14,29 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 from mathutils import Matrix, Vector
+import sys
+
+_DEFAULT_BLENDER_CONVERT_DIR = (
+    r'\\wsl.localhost\Ubuntu\home\mboyle\Honours\Code\BlenderConvert'
+)
+# Another machine: set HONOURS_CODE_DIR (Windows form) before starting Blender.
+if os.environ.get('HONOURS_CODE_DIR'):
+    _DEFAULT_BLENDER_CONVERT_DIR = os.path.join(os.environ['HONOURS_CODE_DIR'], 'BlenderConvert')
+try:
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    _script_dir = None
+# Blender sometimes sets __file__ to a bare filename -- verify the module is there.
+if _script_dir and os.path.isfile(os.path.join(_script_dir, 'earth_orientation.py')):
+    _BLENDER_CONVERT_DIR = _script_dir
+else:
+    _BLENDER_CONVERT_DIR = _DEFAULT_BLENDER_CONVERT_DIR
+if _BLENDER_CONVERT_DIR not in sys.path:
+    sys.path.insert(0, _BLENDER_CONVERT_DIR)
+if os.path.dirname(_BLENDER_CONVERT_DIR) not in sys.path:
+    sys.path.insert(0, os.path.dirname(_BLENDER_CONVERT_DIR))
+import earth_orientation  # noqa: E402
+import honours_paths  # noqa: E402  (Code/; where the .blend assets live)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 # Paths from DEMDumpConvert.py → DEMCSVs/<sim_name>/run_XXXX_grains_output|_bodies_output/
@@ -53,7 +76,7 @@ GRAIN_COLOR = (0.35, 0.30, 0.25, 1.0)
 # million-particle instancing path (DEMBulkInstanceBlender.py) requires
 # pre-appended (Code/CLAUDE.md's "Prerequisite" note) -- Voronoi/Noise/Bump
 # nodes only, no image textures, so appending it carries no missing-file risk.
-ROCK_MATERIAL_BLEND_PATH = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert/Blenders/11.blend'
+ROCK_MATERIAL_BLEND_PATH = honours_paths.host_path(honours_paths.assets_dir() + '/Blenders/11.blend')
 ROCK_MATERIAL_NAME       = 'Procedural rock'
 
 # Every grain shares one material, and that material is driven by Object
@@ -68,7 +91,7 @@ GRAIN_RANDOM_ROTATION_SEED = 0
 GRAIN_COLLECTION_NAME = 'DEM_Grains'
 
 # Earth 3-D model (Surface, Atmosphere, Clouds from TheEarth.blend).
-EARTH_MODEL_PATH         = 'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert/TheEarth1.blend'
+EARTH_MODEL_PATH         = honours_paths.host_path(honours_paths.assets_dir() + '/TheEarth1.blend')
 EARTH_PART_NAMES         = ['Surface', 'Atmosphere', 'Clouds']
 EARTH_PHYSICAL_RADIUS_KM = 6371.0
 
@@ -79,9 +102,8 @@ EARTH_SHELL_SCALE = {
 
 EARTH_VIS_SCALE = 0.2   # BU per km → scale_factor ≈ 1.0 for TheEarth1.blend
 
-EARTH_SIDEREAL_DAY_S      = 86164.0905
-EARTH_SPIN_AXIS           = (0.0, -0.3979, 0.9174)
-EARTH_ROTATION_OFFSET_DEG = 0.0
+# TDB of sim time_s = 0 (the run's sobol.setup `epoch`); see earth_orientation.py.
+EARTH_EPOCH_TDB           = earth_orientation.DEFAULT_EPOCH_TDB
 EARTH_ROTATE_CLOUDS       = True
 
 MOON_PHYSICAL_RADIUS_KM = 1737.53
@@ -694,6 +716,7 @@ elif EARTH_MODEL_PATH and not os.path.exists(EARTH_MODEL_PATH):
     print(f'WARNING: EARTH_MODEL_PATH not found ({EARTH_MODEL_PATH}) — Earth skipped.')
 
 _earth_spin_objs = []
+_earth_spin_t_prev = None
 if earth_empty is not None:
     for _obj in earth_empty.children_recursive:
         _base = _object_base_name(_obj.name)
@@ -926,9 +949,16 @@ for frame_num, grain_file in enumerate(grain_files, start=1):
 
             if _earth_spin_objs:
                 time_s_val = float(bdf['time_s'].iloc[0]) if 'time_s' in bdf.columns else 0.0
-                spin_deg   = (time_s_val / EARTH_SIDEREAL_DAY_S) * 360.0 + EARTH_ROTATION_OFFSET_DEG
-                spin_axis  = mathutils.Vector(EARTH_SPIN_AXIS).normalized()
-                q = mathutils.Quaternion(spin_axis, math.radians(spin_deg))
+                if _earth_spin_t_prev is None:
+                    print(f'Earth time-of-day: epoch {EARTH_EPOCH_TDB} TDB + time_s.' if not sun_row.empty
+                          else 'Earth time-of-day: arbitrary (no Sun row, e.g. hyperbola); spin rate still sidereal.')
+                else:
+                    _step_deg = abs(time_s_val - _earth_spin_t_prev) / earth_orientation.EARTH_SIDEREAL_DAY_S * 360.0
+                    if _step_deg > 90.0:
+                        print(f'WARNING: Earth spins {_step_deg:.0f} deg between keys at frame {frame_num}; '
+                              'interpolated spin will look wrong (> 180 deg reverses).')
+                _earth_spin_t_prev = time_s_val
+                q = mathutils.Quaternion(earth_orientation.earth_quaternion(time_s_val, EARTH_EPOCH_TDB))
                 for _obj in _earth_spin_objs:
                     _obj.rotation_quaternion = q
                     _obj.keyframe_insert(data_path='rotation_quaternion', frame=frame_num)

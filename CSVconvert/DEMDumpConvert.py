@@ -9,6 +9,7 @@ _CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 from viz.dump_frames import GRAIN_VIS_SCALE, dump_paths, iter_dump_frames, read_setup_flags  # noqa: E402
+import honours_paths  # noqa: E402  (data folder for the default BASE_OUTPUT_DIR)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 INPUT_DIR    = "/home/mboyle/Honours/sobol_mass_runs/sobol_20260629_132547_blender_vis_earth_aligned_np500/run_0001"
@@ -20,7 +21,7 @@ DUMP_PREFIX  = "sobol"   # dumps are <DUMP_PREFIX>_[0-9]*
 #   DEMCSVs\<sim_name>\<run_name>_grains_output\   one <dump>.npz per dump
 # where <sim_name> is the simulation folder (parent of INPUT_DIR) and
 # <run_name> is the last component of INPUT_DIR (e.g. run_0001).
-BASE_OUTPUT_DIR = "/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs"
+BASE_OUTPUT_DIR = honours_paths.data_dir() + "/DEMCSVs"  # default: Max's OneDrive data folder
 
 _run_name         = os.path.basename(INPUT_DIR.rstrip('/'))
 _sim_name         = os.path.basename(os.path.dirname(INPUT_DIR.rstrip('/')))

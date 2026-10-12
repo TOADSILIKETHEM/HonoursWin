@@ -20,6 +20,9 @@ from mathutils import Quaternion, Vector
 _DEFAULT_BLENDER_CONVERT_DIR = (
     r'\\wsl.localhost\Ubuntu\home\mboyle\Honours\Code\BlenderConvert'
 )
+# Another machine: set HONOURS_CODE_DIR (Windows form) before starting Blender.
+if os.environ.get('HONOURS_CODE_DIR'):
+    _DEFAULT_BLENDER_CONVERT_DIR = os.path.join(os.environ['HONOURS_CODE_DIR'], 'BlenderConvert')
 try:
     _script_dir = os.path.dirname(os.path.abspath(__file__))
 except NameError:

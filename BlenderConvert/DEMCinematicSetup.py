@@ -11,6 +11,7 @@ import contextlib
 import glob
 import math
 import os
+import sys
 
 import bpy
 import mathutils
@@ -18,17 +19,22 @@ import numpy as np
 import pandas as pd
 from mathutils import Vector
 
+import earth_orientation
+
+_CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _CODE_DIR not in sys.path:
+    sys.path.insert(0, _CODE_DIR)
+import honours_paths  # noqa: E402
+
 # -- Configuration (same defaults DEMBulkVizBlender.py already used) --------
-EARTH_MODEL_PATH = (
-    'c:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert/TheEarth1.blend'
-)
+# Asset folder from Code/honours_paths.py (default: Max's OneDrive BlenderConvert/).
+EARTH_MODEL_PATH = honours_paths.host_path(honours_paths.assets_dir() + '/TheEarth1.blend')
 EARTH_PART_NAMES = ['Surface', 'Atmosphere', 'Clouds']
 EARTH_SHELL_SCALE = {'Atmosphere': 1.004, 'Clouds': 1.002}
 EARTH_PHYSICAL_RADIUS_KM = 6371.0
 EARTH_VIS_SCALE = 0.2
-EARTH_SIDEREAL_DAY_S = 86164.0905
-EARTH_SPIN_AXIS = (0.0, -0.3979, 0.9174)
-EARTH_ROTATION_OFFSET_DEG = 0.0
+# TDB of sim time_s = 0 (the run's sobol.setup `epoch`); see earth_orientation.py.
+EARTH_EPOCH_TDB = earth_orientation.DEFAULT_EPOCH_TDB
 EARTH_ROTATE_CLOUDS = True
 EARTH_EMPTY_NAME = 'Earth'
 SUN_LAMP_ENERGY = 10.0
@@ -275,8 +281,8 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
     if n == 0:
         return earth_empty
 
-    spin_axis = Vector(EARTH_SPIN_AXIS).normalized()
-    offset_rad = math.radians(EARTH_ROTATION_OFFSET_DEG)
+    spin_t_prev = None
+    spin_logged = False
 
     for i in range(n):
         frame = bpy.context.scene.frame_start + i
@@ -296,8 +302,17 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
             earth_empty.keyframe_insert(data_path='location', frame=frame)
             if 'time_s' in earth.index and pd.notna(earth['time_s']):
                 t_s = float(earth['time_s'])
-                angle = (t_s / EARTH_SIDEREAL_DAY_S) * 2.0 * math.pi + offset_rad
-                q = mathutils.Quaternion(spin_axis, angle)
+                if not spin_logged:
+                    spin_logged = True
+                    if 'Sun' in df['name'].values:
+                        print(f'Earth time-of-day: epoch {EARTH_EPOCH_TDB} TDB + time_s.')
+                    else:
+                        print('Earth time-of-day: arbitrary (no Sun row, e.g. hyperbola); '
+                              'spin rate still sidereal.')
+                if spin_t_prev is not None:
+                    _warn_spin_step(t_s - spin_t_prev, frame)
+                spin_t_prev = t_s
+                q = mathutils.Quaternion(earth_orientation.earth_quaternion(t_s, EARTH_EPOCH_TDB))
                 for child in earth_empty.children_recursive:
                     if child.name.startswith('Surface') or child.name.startswith('Clouds'):
                         child.rotation_quaternion = q
@@ -331,6 +346,15 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
             sun_body.keyframe_insert(data_path='location', frame=frame)
 
     return earth_empty
+
+
+def _warn_spin_step(dt_s, frame):
+    """Quaternion keys interpolate the short way round: > 180 deg of spin per
+    frame reverses the apparent direction, so warn well before that."""
+    step_deg = abs(dt_s) / earth_orientation.EARTH_SIDEREAL_DAY_S * 360.0
+    if step_deg > 90.0:
+        print(f'WARNING: Earth spins {step_deg:.0f} deg between keys at frame {frame}; '
+              'interpolated spin will look wrong (> 180 deg reverses).')
 
 
 def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None,

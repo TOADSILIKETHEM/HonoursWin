@@ -292,17 +292,24 @@ earth_location_bu = (earth_km - apophis_km) × EARTH_VIS_SCALE
 Earth is ~38 000 km from Apophis at closest approach, which maps to ~7600 BU —
 well within Cycles' ray-march depth range.
 
-**Earth rotation.** The Surface and Clouds shells are rotated each frame about the
-ecliptic-frame spin axis using quaternion keyframes:
+**Earth rotation.** The Surface and Clouds shells get one orientation quaternion per
+frame from `earth_orientation.earth_quaternion(time_s, EARTH_EPOCH_TDB)`, so both spin
+rate and time of day are real:
 
 ```
-spin_deg = (time_s / EARTH_SIDEREAL_DAY_S) × 360° + EARTH_ROTATION_OFFSET_DEG
+q = R_z(90°) · R_z(−p_A) · R_x(−ε_A) · R_z(GMST(UT1))      UT1 = epoch + time_s − ΔT
 ```
 
-The axis `(0, -sin 23.44°, cos 23.44°) = (0, −0.3979, 0.9174)` encodes Earth's
-23.44° obliquity relative to the ecliptic, in PHANTOM's ecliptic J2000 reference
-frame (X = vernal equinox, Z = ecliptic north). The Atmosphere shell is omitted from
-rotation because it is spherically symmetric; rotating it has no visible effect.
+`TheEarth1.blend` is Earth-fixed (+X Greenwich, +Z north; read from its UVs). GMST is
+IAU 1982 (Meeus 12.4), ε_A and p_A are the mean obliquity and precession in longitude
+of date, ΔT = 69 s, `time_s = 0` is the `.setup` epoch (2029-04-10 00:00 TDB). The
+final R_z(90°) is because the sim frame is the J2000 ecliptic turned +90° about the
+ecliptic pole (PHANTOM `set_binary` treats the Horizons node longitude as a position
+angle, `big_omega = posang_ascnode + π/2`). Nutation and polar motion are left out
+(< 0.01°). Check: at closest approach (21:44 UT, 13 Apr 2029) the sub-Apophis point is
+42.5°W 28.6°N (mid-Atlantic), and Europe/Africa are on the night side. Hyperbola runs (no
+Sun row) keep the sidereal rate, but their time of day is arbitrary. The Atmosphere shell is
+not rotated: it is spherically symmetric.
 
 **Moon and Sun visual body.** A grey UV sphere represents the Moon, scaled to
 `MOON_PHYSICAL_RADIUS_KM × EARTH_VIS_SCALE`. An emissive white UV sphere represents

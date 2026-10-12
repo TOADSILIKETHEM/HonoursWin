@@ -11,6 +11,10 @@ Paths relative to `Code/DEMCSVs/`. After WSL conversion, each run has `<run>_bod
 | `torque_align_obj_fine_dt/` | `sobol_20260601_204015_torque_align_obj_breakup_fine_dt` | run_0001 breakup only | dtmax ≈ 5 min | High frame-rate breakup animation |
 | `sobol_20260629_132547_blender_vis_earth_aligned_np500/` | `sobol_20260629_132547_blender_vis_earth_aligned_np500` | run_0001 | Earth-aligned spin vis | Check script comments for figure target |
 | `sobol_20260608_163227_torque_align_obj_fine_dt_nospin_np500/` | matching WSL batch | run_0001 | Fine-dt, no-spin variant | Compare to fine_dt with spin |
+| `sobol_20261008_193158_breakup_np10k_rp8000/` | same name in `sobol_mass_runs/` | run_0001 | np10k (10,957) frictionless settled body, hyperbola rp 8,000 km, tidal breakup (`../../docs/BATCHES.md`) | `run_0001_render_instance_grains/`: 62 frames, 256 samples + `animation.mp4` |
+| `sobol_20261009_104305_breakup_np10k_fric_boulders_rp8000/` | same name in `sobol_mass_runs/` | run_0001 | Same flyby, friction + frictional settle (8,352) + bonded lobes and boulders | `run_0001_render_instance_grains/`: 62 frames, 500 samples + `animation.mp4` (render-only rerun after a CUDA OOM at frame 18) |
+| `mia_ozstar40k_settle/` | `sobol_mass_runs/mia_ozstar40k_settle` (hardlinks to `~/Honours/mia_ozstar/40k/settle/`) | run_0001 | Mia's OzSTAR 40k bundle: cloud collapse, 112,529 grains, `apophis_00000`–`21` (`../../docs/CONTEXT_CHANGELOG.md` 2026-10-10) | `run_0001_render_instance_grains/`: 22 frames, 500 samples, 8 fps + `animation.mp4`; fixed camera, body shrinks in frame |
+| `mia_ozstar40k_fb40_resettle/` | `sobol_mass_runs/mia_ozstar40k_fb40_resettle` (hardlinks to `~/Honours/mia_ozstar/40k/fb40/`) | run_0001 | Same bundle: cropped body (32,530 grains), 40% in boulders, re-settle `body_00000`–`30` | `run_0001_render_instance_grains/`: 31 frames, 500 samples, 8 fps + `animation.mp4`; body small in frame, boulders not coloured, little motion |
 | `_verify_lattice_fix/` | `sobol_mass_runs/_verify_lattice_fix/...` | run_0001 (baseline_58deg, np500, 4 dumps) | Dev/regression for bulk viz (P0–P3) | grain npz / bodies CSV + `run_0001_viz/` after preprocess |
 
 All `*_grains_output/` folders in the table above were CSV-only until the 2026-09-13 CSV→npz migration; running `CSVconvert/grains_csv_to_npz.py` (their WSL dumps are gone, so `DEMDumpConvert.py` can't be re-run) added a same-stem `.npz` next to every grain CSV without touching the CSVs. Readers use the `.npz`.
@@ -85,7 +89,7 @@ One frame index (`00000`, `00001`, …) per sorted grain npz file in `_grains_ou
 
 Earth model: `BlenderConvert/TheEarth1.blend` (appended automatically when solar system is detected).
 
-## Per-sphere workflow (default)
+## Per-sphere workflow (manual GUI; TUI default is `instance_grains`, per-sphere = parity reference)
 
 1. Open `BlenderConvert/DEMGrainsBlenderEarthCam.py`
 2. Set `GRAINS_DIR` and `BODIES_CSV_DIR` to the chosen `run_XXXX_*_output/` paths

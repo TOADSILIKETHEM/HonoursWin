@@ -60,15 +60,16 @@ SCRIPT_FOR_VIZ_PATH = {
 ROCK_MATERIAL_NAME = "Procedural rock"
 _ROCK_MATERIAL_BLEND_RELATIVE = Path("Blenders/11.blend")
 
-# .blend / HDRI assets are untracked and stay in the OneDrive folder; the code
-# itself lives in WSL (~/Honours/Code) since 2026-09-25. Blender (Windows)
-# and pytest (WSL) see that folder under different roots.
-_ASSETS_DIR_WIN = "C:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert"
-_ASSETS_DIR_WSL = "/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert"
-ASSETS_DIR = Path(
-    os.environ.get("HONOURS_BLENDER_ASSETS_DIR")
-    or (_ASSETS_DIR_WIN if os.name == "nt" else _ASSETS_DIR_WSL)
-)
+# .blend / HDRI assets are untracked; Code/honours_paths.py says where
+# (HONOURS_BLENDER_ASSETS_DIR > Code/local_paths.json > Max's OneDrive folder).
+# Blender (Windows) and pytest (WSL) see that folder under different roots,
+# which host_path() handles.
+_CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _CODE_DIR not in sys.path:
+    sys.path.insert(0, _CODE_DIR)
+import honours_paths  # noqa: E402
+
+ASSETS_DIR = Path(honours_paths.host_path(honours_paths.assets_dir()))
 
 # All patterned constants sit at column 0 in their scripts, exactly once.
 _GRAINS_DIR_RE = r"(?m)^GRAINS_DIR\s*=\s*\([^)]*\)"
@@ -80,9 +81,53 @@ _RENDER_RESOLUTION_RE = r"(?m)^RENDER_RESOLUTION\s*=\s*\([^)]*\)"
 _MAX_FRAMES_RE = r"(?m)^MAX_FRAMES\s*=\s*None\b"
 
 
+# Blender's startup scene (loaded by `blender --background` with no .blend).
+# The DEM scripts make their own camera (DEM_TrackCam) and lights, so these
+# are never wanted; the default Light otherwise adds an unphysical point lamp.
+_STARTUP_DEFAULTS = (("Cube", "MESH"), ("Camera", "CAMERA"), ("Light", "LIGHT"))
+
+
+def remove_startup_defaults() -> list:
+    """Delete the startup Cube/Camera/Light objects and their now-unused data. Returns names removed."""
+    if bpy is None:
+        raise RuntimeError("bpy is required to clear the startup scene")
+    data_for_type = {"MESH": bpy.data.meshes, "CAMERA": bpy.data.cameras, "LIGHT": bpy.data.lights}
+    removed = []
+    for name, obj_type in _STARTUP_DEFAULTS:
+        obj = bpy.data.objects.get(name)
+        if obj is None or obj.type != obj_type:
+            continue
+        data = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if data is not None and data.users == 0:
+            data_for_type[obj_type].remove(data)
+        removed.append(name)
+    return removed
+
+
+def require_camera(scene) -> None:
+    """The startup Camera is removed before the viz script runs (self-contained
+    .blend), so a script that skipped its tracking camera leaves none."""
+    if scene.camera is None:
+        raise RuntimeError(
+            "no scene camera: the viz script skipped its tracking camera "
+            "(no grain .npz files in the manifest's grains_dir, or SETUP_CAMERA = False); "
+            "see the WARNING above in this log")
+
+
 def deep_dark_space_hdri_path(script_dir=None) -> Path:
     root = Path(script_dir) if script_dir is not None else ASSETS_DIR
     return root / _HDRI_RELATIVE
+
+
+def _set_black_world() -> None:
+    """Plain black World -- Blender's default grey one would light the scene like an overcast sky."""
+    world = bpy.context.scene.world or bpy.data.worlds.new("World")
+    bpy.context.scene.world = world
+    world.use_nodes = True
+    bg = world.node_tree.nodes.get("Background")
+    if bg is not None:
+        bg.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
 
 
 def setup_deep_dark_space_world(hdri_path=None) -> bool:
@@ -91,8 +136,10 @@ def setup_deep_dark_space_world(hdri_path=None) -> bool:
     if not path.is_file():
         print(
             f"[DEMHeadlessRender] WARNING: HDRI not found at {path}; "
-            "leaving default World"
+            "black sky instead"
         )
+        if bpy is not None:
+            _set_black_world()
         return False
     if bpy is None:
         raise RuntimeError("bpy is required to apply the World")
@@ -130,8 +177,14 @@ def setup_deep_dark_space_world(hdri_path=None) -> bool:
     return True
 
 
+# OPTIX/CUDA first (NVIDIA, Max's RTX 4050); HIP/ONEAPI/METAL let AMD/Intel/Apple
+# GPUs render too.
+GPU_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
+
+
 def setup_cycles_gpu(scene=None) -> str:
-    """Enable Cycles on OPTIX, else CUDA. GPU only — no CPU hybrid. Raises if none."""
+    """Enable Cycles on the first GPU backend with devices (OPTIX, else CUDA, then
+    HIP/ONEAPI/METAL). GPU only — no CPU hybrid. Raises if none."""
     if bpy is None:
         raise RuntimeError("bpy is required to enable Cycles GPU")
 
@@ -144,7 +197,7 @@ def setup_cycles_gpu(scene=None) -> str:
     prefs = cycles_addon.preferences
 
     backend = None
-    for compute in ("OPTIX", "CUDA"):
+    for compute in GPU_BACKENDS:
         try:
             prefs.compute_device_type = compute
         except Exception:
@@ -166,7 +219,9 @@ def setup_cycles_gpu(scene=None) -> str:
 
     if backend is None:
         scene.cycles.device = "CPU"
-        raise RuntimeError("No OPTIX/CUDA GPU found for Cycles")
+        raise RuntimeError(
+            f"No GPU found for Cycles (tried {'/'.join(GPU_BACKENDS)}); use --device cpu"
+        )
 
     for device in prefs.devices:
         device.use = device.type == backend
@@ -176,6 +231,17 @@ def setup_cycles_gpu(scene=None) -> str:
         f"[DEMHeadlessRender] Cycles device=GPU backend={backend} enabled={enabled}"
     )
     return backend
+
+
+def setup_cycles_cpu(scene=None) -> str:
+    """Cycles on CPU only -- for machines without a supported GPU (slow; use low --samples)."""
+    if bpy is None:
+        raise RuntimeError("bpy is required to set the Cycles device")
+    scene = scene if scene is not None else bpy.context.scene
+    scene.render.engine = "CYCLES"
+    scene.cycles.device = "CPU"
+    print("[DEMHeadlessRender] Cycles device=CPU")
+    return "CPU"
 
 
 def encode_video(out_dir: Path, n_frames: int, fps: int, video_name: str = "animation.mp4") -> Path:
@@ -262,6 +328,9 @@ def _parse_args():
     p.add_argument("--fps", type=int, default=24)
     p.add_argument("--max-frames", type=int, default=None)
     p.add_argument("--camera-mode", choices=("auto", "grain_only"), default="auto")
+    p.add_argument("--device", choices=("gpu", "cpu"), default=honours_paths.cycles_device(),
+                   help="Cycles device: gpu (OPTIX/CUDA/HIP/ONEAPI/METAL) or cpu (no GPU); "
+                        "default cycles_device from Code/local_paths.json, else gpu")
     p.add_argument("--encode-video", action="store_true", default=False)
     p.add_argument("--video-fps", type=int, default=None)
     args = p.parse_args(argv)
@@ -320,8 +389,25 @@ def patch_script_source(viz_path, src, *, grains_dir=None, bodies_dir=None,
     return src
 
 
+# Stand-in grain colour when 11.blend is absent: DEMGrainsBlenderEarthCam.py's
+# GRAIN_COLOR fallback, so both paths degrade to the same look.
+_ROCK_STANDIN_RGBA = (0.35, 0.30, 0.25, 1.0)
+
+
+def _make_rock_standin_material():
+    mat = bpy.data.materials.new(ROCK_MATERIAL_NAME)
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Base Color"].default_value = _ROCK_STANDIN_RGBA
+    bsdf.inputs["Roughness"].default_value = 0.9
+    return mat
+
+
 def ensure_procedural_rock_material(blend_path=None) -> None:
-    """Append "Procedural rock" from Blenders/11.blend unless already present."""
+    """Append "Procedural rock" from Blenders/11.blend unless already present.
+
+    No 11.blend (e.g. the shared asset pack, which leaves materials out): build a
+    plain stand-in under the same name so the instance path still renders."""
     if bpy is None:
         raise RuntimeError("bpy is required to append the Procedural rock material")
     if bpy.data.materials.get(ROCK_MATERIAL_NAME) is not None:
@@ -331,7 +417,10 @@ def ensure_procedural_rock_material(blend_path=None) -> None:
         else ASSETS_DIR / _ROCK_MATERIAL_BLEND_RELATIVE
     )
     if not path.is_file():
-        raise RuntimeError(f"{path} not found -- needed for {ROCK_MATERIAL_NAME!r} (instance path)")
+        print(f"[DEMHeadlessRender] WARNING: {path} not found -- plain stand-in "
+              f"{ROCK_MATERIAL_NAME!r} material (no procedural rock texture)")
+        _make_rock_standin_material()
+        return
     found = False
     with bpy.data.libraries.load(str(path).replace("\\", "/"), link=False) as (data_from, data_to):
         if ROCK_MATERIAL_NAME in data_from.materials:
@@ -376,6 +465,10 @@ def main() -> None:
     else:
         patch_kwargs["manifest"] = str(Path(args.manifest).resolve()).replace("\\", "/")
 
+    removed = remove_startup_defaults()
+    if removed:
+        print(f"[DEMHeadlessRender] removed startup objects: {', '.join(removed)}")
+
     if args.viz_path == "instance":
         ensure_procedural_rock_material()
 
@@ -386,10 +479,14 @@ def main() -> None:
     setup_deep_dark_space_world()
 
     scene = bpy.context.scene
+    require_camera(scene)
     if args.max_frames is not None:
         scene.frame_end = min(scene.frame_end, scene.frame_start + args.max_frames - 1)
 
-    setup_cycles_gpu(scene)
+    if args.device == "cpu":
+        setup_cycles_cpu(scene)
+    else:
+        setup_cycles_gpu(scene)
     scene.cycles.samples = args.samples
     scene.render.resolution_x = res_x
     scene.render.resolution_y = res_y

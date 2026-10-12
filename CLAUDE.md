@@ -10,13 +10,13 @@ PHANTOM dumps → bodies CSV + grains npz → Blender renders; composite/instanc
 | Data: `DEMCSVs/`, `csv_output/`, `ShortCSVlist/`, `.blend`, `BlenderConvert/{Blenders,Shapes,assets}`, `.venv`, renders, `docs/p0_*` | OneDrive `C:\Users\22boy\OneDrive\Documents\GC-Max_desktop\Honours\Code` (WSL `/mnt/c/...`) | OneDrive |
 
 - Windows tools (`blender.exe`, `.venv` python) reach code via `\\wsl.localhost\Ubuntu\home\mboyle\Honours\Code` (WSL must be running).
-- Assets: `DEMHeadlessRender.ASSETS_DIR` (override `$HONOURS_BLENDER_ASSETS_DIR`). TUI: `tui_sim_render.CODE_DIR` / `DATA_DIR`.
+- Machine paths (data, assets, `blender.exe`, preprocess python, Cycles device): `honours_paths.py` = env > gitignored `local_paths.json` > Max-laptop defaults (no file = unchanged). Write/check with `sobol/setup_paths.py [--check]`. Windows children get `HONOURS_*` via `WSLENV` (`child_env`). Missing assets fall back: stand-in rock material, bare-sphere Earth, black sky. Other-machine quickstart: `README.md`; example pack: `make_asset_pack.py` → `<data>/share/honours_viz_pack.zip` (no materials/textures/HDRI).
 - **Stale-copy trap:** old `.py` files still sit in OneDrive `BlenderConvert/` until retired. Opening a script there, or reopening a `.blend` saved with an auto-run Text block, runs the frozen copy. Open scripts from the WSL path; re-save such `.blend` files.
 
 ## Confirm before assuming
 
 - **Cycles, not EEVEE.** Never offer an EEVEE-only diagnosis (Z-fighting depth buffer, froxels).
-- **Blender version** — last confirmed 2026-09-07: 5.2.1 LTS, `C:\Program Files\Blender Foundation\Blender 5.2\blender.exe`, Python 3.13, numpy bundled, no psutil; RTX 4050 6 GB, OPTIX/CUDA. API era: `group.interface.new_socket`, "Specular IOR Level", `SequenceEditor.strips`.
+- **Blender version** — last confirmed 2026-09-07: 5.2.1 LTS, `C:\Program Files\Blender Foundation\Blender 5.2\blender.exe`, Python 3.13, numpy bundled, pandas added by hand (`AppData\Roaming\Blender Foundation\Blender\5.2\scripts\addons\modules`; stock Blender lacks it), no psutil; RTX 4050 6 GB, OPTIX/CUDA. API era: `group.interface.new_socket`, "Specular IOR Level", `SequenceEditor.strips`.
 - **Which `.blend` / scene / object**, and how it looked in the source file.
 - **Which `DEMCSVs/` run** (intact vs breakup, fine-dt vs standard, which `run_XXXX_*_output/`).
 - Glitch → **simplest cause first** (coincident geometry / Z-fighting, shared radius) before precision/engine theories.
