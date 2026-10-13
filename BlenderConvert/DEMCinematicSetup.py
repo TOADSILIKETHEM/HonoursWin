@@ -348,12 +348,22 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
     return earth_empty
 
 
+CAMERA_AIM_NAME = 'DEM_CameraAim'  # Empty the camera's Track To follows (see setup_camera)
+
+
 def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None,
                  rotation_interp=None):
     """Keyframe a tracking camera. ``core_fn(i)`` returns the frame-``i`` aim point.
 
     ``rotation_interp`` (e.g. 'LINEAR', what DEMGrainsBlenderEarthCam.py uses)
     overrides the rotation keys' interpolation; None keeps Blender's default.
+
+    The rotation keys are only exact on key frames. Between them (motion blur, or
+    a --slowmo stretch) Bezier location + LINEAR rotation aimed the camera off the
+    core, by 2.5-4.5 deg on a 40k flyby approach, so the body swung side to side.
+    A Track To constraint on an aim Empty (CAMERA_AIM_NAME, keyed at the core on the
+    same Bezier curve as the camera) aims it on every frame; on key frames it gives
+    the same orientation as the keys (-Z at the core, Y up).
 
     Same time-remap hazard as keyframe_bodies_and_earth() above: this reads
     earth_empty's current (possibly time-remap-sampled) position per frame to
@@ -393,6 +403,13 @@ def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None,
             math.sin(el),
         )).normalized()
 
+    aim = bpy.data.objects.get(CAMERA_AIM_NAME)
+    if aim is None:
+        aim = bpy.data.objects.new(CAMERA_AIM_NAME, None)
+        scene.collection.objects.link(aim)
+    if aim.animation_data is not None:
+        aim.animation_data_clear()
+
     prev_q = None
     for i in range(n):
         frame = scene.frame_start + i
@@ -423,10 +440,17 @@ def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None,
         cam_obj.rotation_quaternion = q
         cam_obj.keyframe_insert(data_path='location', frame=frame)
         cam_obj.keyframe_insert(data_path='rotation_quaternion', frame=frame)
+        aim.location = core
+        aim.keyframe_insert(data_path='location', frame=frame)
     if rotation_interp:
         for fc in _fcurves(cam_obj, 'rotation_quaternion'):
             for kp in fc.keyframe_points:
                 kp.interpolation = rotation_interp
+    track = cam_obj.constraints.get('DEM_AimAtCore') or cam_obj.constraints.new('TRACK_TO')
+    track.name = 'DEM_AimAtCore'
+    track.target = aim
+    track.track_axis = 'TRACK_NEGATIVE_Z'
+    track.up_axis = 'UP_Y'
     return cam_obj
 
 

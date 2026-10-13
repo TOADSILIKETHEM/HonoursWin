@@ -63,6 +63,7 @@ RENDER_RESOLUTION = (1920, 1080)
 # handles are interpolated on the same curve the per-sphere path keyframes;
 # older manifests without handles hold each real frame (visible stepping).
 SLOWMO_FACTOR = 4
+_KEY_FRAME_START = 1  # real frame 1 is keyed at timeline frame 1 (before the frame_map stretch)
 TARGET_FPS = 60
 # Shared instance mesh: the per-sphere path's 12x8 flat-shaded UV sphere
 # (DEMGrainsBlenderEarthCam.py), so both paths render identical grains.
@@ -70,6 +71,16 @@ GRAIN_UV_SEGMENTS = 12
 GRAIN_UV_RINGS = 8
 PROCEDURAL_ROCK_MAT_NAME = 'Procedural rock'
 INSTANCE_MAT_NAME = 'DEM_GrainInstance'
+# Per-grain colour variation, keyed on Object Info Random (one value per
+# instance in Cycles): HSV value/hue/saturation ranges, then a multiply tint
+# between two colours. 'Procedural rock' is greyscale, so hue/sat only bite
+# if the base gains colour; value + tint do the visible work.
+GRAIN_VAR_VALUE_RANGE = (0.85, 1.15)
+GRAIN_VAR_HUE_RANGE = (0.48, 0.52)
+GRAIN_VAR_SAT_RANGE = (0.9, 1.1)
+GRAIN_VAR_TINT_A = (0.449, 0.414, 0.37, 1.0)
+GRAIN_VAR_TINT_B = (0.86, 0.91, 1.0, 1.0)
+GRAIN_VAR_TINT_FACTOR = 1.0
 # Per-sphere camera settings (DEMGrainsBlenderEarthCam.py).
 CORE_GRAIN_FRACTION = 0.80
 CAMERA_ROTATION_INTERP = 'LINEAR'
@@ -211,7 +222,62 @@ def _instance_rock_material(src):
         nt.links.new(attr.outputs['Fac'], scale.inputs['Scale'])
         for sock in targets:
             nt.links.new(scale.outputs['Vector'], sock)
+    _add_grain_colour_variation(nt)
     return mat
+
+
+def _add_grain_colour_variation(nt):
+    """Insert per-instance HSV + tint nodes on the Principled Base Color link only.
+
+    Bump/roughness keep reading the original colour source, so only the
+    albedo varies grain to grain.
+    """
+    bsdf = next((n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    if bsdf is None:
+        return
+    base = bsdf.inputs['Base Color']
+    x, y = bsdf.location.x, bsdf.location.y
+    info = nt.nodes.new('ShaderNodeObjectInfo')
+    info.name = 'GrainVar_ObjInfo'
+    info.location = (x - 900, y)
+    hsv = nt.nodes.new('ShaderNodeHueSaturation')
+    hsv.name = 'GrainVar_HSV'
+    hsv.location = (x - 400, y + 100)
+    if base.links:
+        src = base.links[0].from_socket
+        nt.links.remove(base.links[0])
+        nt.links.new(src, hsv.inputs['Color'])
+    else:
+        hsv.inputs['Color'].default_value = base.default_value
+    for i, (name, rng, sock) in enumerate((
+        ('GrainVar_Value', GRAIN_VAR_VALUE_RANGE, 'Value'),
+        ('GrainVar_Hue', GRAIN_VAR_HUE_RANGE, 'Hue'),
+        ('GrainVar_Sat', GRAIN_VAR_SAT_RANGE, 'Saturation'),
+    )):
+        mr = nt.nodes.new('ShaderNodeMapRange')
+        mr.name = name
+        mr.location = (x - 650, y + 250 - 250 * i)
+        mr.inputs['To Min'].default_value = rng[0]
+        mr.inputs['To Max'].default_value = rng[1]
+        nt.links.new(info.outputs['Random'], mr.inputs['Value'])
+        nt.links.new(mr.outputs['Result'], hsv.inputs[sock])
+    tint = nt.nodes.new('ShaderNodeValToRGB')
+    tint.name = 'GrainVar_Tint'
+    tint.location = (x - 650, y + 500)
+    tint.color_ramp.elements[0].color = GRAIN_VAR_TINT_A
+    tint.color_ramp.elements[1].color = GRAIN_VAR_TINT_B
+    nt.links.new(info.outputs['Random'], tint.inputs['Fac'])
+    mul = nt.nodes.new('ShaderNodeMix')
+    mul.name = 'GrainVar_Multiply'
+    mul.data_type = 'RGBA'
+    mul.blend_type = 'MULTIPLY'
+    mul.location = (x - 200, y + 300)
+    # Mix has float/vector/colour sockets sharing names; pick by identifier
+    sock = {s.identifier: s for s in (*mul.inputs, *mul.outputs)}
+    sock['Factor_Float'].default_value = GRAIN_VAR_TINT_FACTOR
+    nt.links.new(hsv.outputs['Color'], sock['A_Color'])
+    nt.links.new(tint.outputs['Color'], sock['B_Color'])
+    nt.links.new(sock['Result_Color'], base)
 
 
 def _build_point_cloud(pos, grain_radius_vis, radii=None, rots=None, present=None):
@@ -333,7 +399,9 @@ def _key_index(scene):
     ctime = (scene.frame_current + scene.frame_subframe) * (
         scene.render.frame_map_old / scene.render.frame_map_new
     )
-    return ctime - scene.frame_start
+    # the start the keys were authored at, not scene.frame_start: a headless
+    # --slowmo render moves frame_start onto the first dump
+    return ctime - _KEY_FRAME_START
 
 
 def _load_key(k):
@@ -476,7 +544,7 @@ def main():
     # while building the camera track; if frame_map were active here, that
     # sampling would read Earth's position at the wrong (remapped) time and
     # the camera would be aimed using the wrong slice of its motion.
-    scene.frame_start = 1
+    scene.frame_start = _KEY_FRAME_START
     scene.frame_end = max(1, len(frame_ids))
     scene.render.frame_map_old = 100
     scene.render.frame_map_new = 100

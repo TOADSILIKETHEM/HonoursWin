@@ -6,7 +6,7 @@ Run with:
         [--viz-path per_sphere|composite|instance] \\
         [--grains-dir PATH --bodies-dir PATH]      (per_sphere) \\
         [--manifest PATH/manifest.json]            (composite / instance) \\
-        [--resolution 1920x1080] [--samples 500] [--fps 24] \\
+        [--resolution 1920x1080] [--samples 124] [--fps 24] \\
         [--max-frames N] [--camera-mode auto|grain_only] \\
         [--device gpu|cpu] [--encode-video] [--video-fps N]
 
@@ -304,8 +304,97 @@ def render_banner(viz_path, frame_start, frame_end, res_x, res_y, samples, devic
             f"at {res_x}x{res_y}, {samples} samples, {device.upper()}, to {out_dir}")
 
 
+def apply_slowmo_range(scene, slowmo) -> None:
+    """With SLOWMO_FACTOR = N, timeline frame N*k shows dump k (frame_map 100 -> 100*N);
+    frames 1..N-1 would only hold dump 1, so start the render on it."""
+    if slowmo > 1:
+        scene.frame_start = slowmo
+
+
+def apply_resume(scene, resume) -> None:
+    """Skip frames whose PNG is already in the output dir (carry on an interrupted render)."""
+    if resume:
+        scene.render.use_overwrite = False
+        scene.render.use_placeholder = False
+
+
+# Earth's textures (up to 21600x10800, ~3 GB) plus the volume atmosphere overflow a
+# 6 GB laptop GPU; capped at 4K a frame of Mia's 40k flyby went 41 -> 20 s with
+# identical pixels (Earth is ~130 px across at 1080p). Persistent data keeps the
+# synced scene between frames (-> 16 s, max diff 1/255). Benchmarks 2026-10-13.
+# The cap is per image (cap_image_textures) so the 8K clouds stay full size; resampling
+# softens city lights/stars slightly vs the old global cap (frame 44 mean 0.72/255).
+TEXTURE_MAX_PX = 4096
+# Image names kept at full size (case-insensitive substring): the cloud layer, at Max's call.
+TEXTURE_CAP_EXEMPT = ("clouds",)
+# adaptive sampling + denoise are on, so 124 looks like 1000 (mean diff ~0.2/255, sample sweep 2026-10-13)
+DEFAULT_SAMPLES = 124
+
+
+# TheEarth1.blend's Surface/Clouds/Atmosphere dice at 1 px per edge (adaptive
+# subdivision + true displacement), so triangle count and memory grow with Earth's
+# on-screen area: on the 40k flyby approach 10 -> 20 GB and 15 -> 58 s/frame, then
+# swapping. At 4 px a frame-44 close-up differs by 0.25/255 mean and memory stays flat.
+ADAPTIVE_PIXEL_SIZE_MIN = 4.0
+
+
+def _has_displacement(obj) -> bool:
+    for slot in obj.material_slots:
+        tree = getattr(slot.material, "node_tree", None) if slot.material else None
+        for node in (tree.nodes if tree else ()):
+            if node.type == "OUTPUT_MATERIAL" and any(
+                    i.name == "Displacement" and i.is_linked for i in node.inputs):
+                return True
+    return False
+
+
+def coarsen_adaptive_subdivision(scene) -> None:
+    """Floor adaptive dicing at ADAPTIVE_PIXEL_SIZE_MIN px; off where no material displaces
+    (a volume-only atmosphere gains nothing from dicing)."""
+    for obj in scene.objects:
+        for mod in getattr(obj, "modifiers", ()):
+            if mod.type != "SUBSURF" or not getattr(mod, "use_adaptive_subdivision", False):
+                continue
+            if not _has_displacement(obj):
+                mod.use_adaptive_subdivision = False
+            elif mod.adaptive_space == "PIXEL" and mod.adaptive_pixel_size < ADAPTIVE_PIXEL_SIZE_MIN:
+                mod.adaptive_pixel_size = ADAPTIVE_PIXEL_SIZE_MIN
+
+
+def apply_gpu_denoise(scene) -> None:
+    """Run OIDN on the GPU: on the CPU it was ~7 of 9.5 s per 1080p frame (40k flyby,
+    RTX 4050); on the GPU 2.6 s with the same pixels (mean diff 0.01/255, 2026-10-13)."""
+    scene.cycles.denoising_use_gpu = True
+
+
+def cap_image_textures(images) -> None:
+    """Shrink file images whose long side exceeds TEXTURE_MAX_PX, keeping aspect, except
+    TEXTURE_CAP_EXEMPT. Per image rather than Cycles' global texture_limit_render (which can't
+    exempt one), and it frees Blender's own copy too, not just the GPU's."""
+    for img in images:
+        w, h = img.size
+        if img.source != "FILE" or max(w, h) <= TEXTURE_MAX_PX:
+            continue
+        if any(tag in img.name.lower() for tag in TEXTURE_CAP_EXEMPT):
+            continue
+        k = TEXTURE_MAX_PX / max(w, h)
+        img.scale(max(1, round(w * k)), max(1, round(h * k)))
+
+
+def apply_render_speedups(scene) -> None:
+    """Keep the scene on the GPU between frames, cap image textures at 4K and
+    coarsen adaptive subdivision (see the constants above)."""
+    scene.render.use_persistent_data = True
+    scene.cycles.texture_limit_render = "OFF"  # cap_image_textures() caps per image instead
+    coarsen_adaptive_subdivision(scene)
+
+
 def validate_args(args) -> None:
     """Cross-flag rules argparse can't express. Raises ValueError."""
+    if args.slowmo < 1:
+        raise ValueError("--slowmo must be >= 1")
+    if args.slowmo != 1 and args.viz_path != "instance":
+        raise ValueError("--slowmo needs --viz-path instance (composite/per_sphere hold each dump)")
     if args.viz_path == "per_sphere":
         if not args.grains_dir or not args.bodies_dir:
             raise ValueError("--viz-path per_sphere requires --grains-dir and --bodies-dir")
@@ -331,14 +420,19 @@ def _parse_args():
     p.add_argument("--bodies-dir", default=None)
     p.add_argument("--output-dir", required=True)
     p.add_argument("--resolution", default="1920x1080")
-    p.add_argument("--samples", type=int, default=500)
+    p.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
     p.add_argument("--fps", type=int, default=24)
     p.add_argument("--max-frames", type=int, default=None)
+    p.add_argument("--slowmo", type=int, default=1,
+                   help="instance only: N timeline frames per dump (same sim time, N x the frames; "
+                        "in-betweens interpolated on the grains' Bezier curves, not simulated)")
     p.add_argument("--camera-mode", choices=("auto", "grain_only"), default="auto")
     p.add_argument("--device", choices=("gpu", "cpu"), default=honours_paths.cycles_device(),
                    help="Cycles device: gpu (OPTIX/CUDA/HIP/ONEAPI/METAL) or cpu (no GPU); "
                         "default cycles_device from Code/local_paths.json, else gpu")
     p.add_argument("--encode-video", action="store_true", default=False)
+    p.add_argument("--resume", action="store_true", default=False,
+                   help="keep frame_*.png already in --output-dir and render only the missing ones")
     p.add_argument("--video-fps", type=int, default=None)
     args = p.parse_args(argv)
     validate_args(args)
@@ -361,7 +455,8 @@ def _sub_exactly_once(pattern: str, replacement: str, src: str, label: str) -> s
 
 
 def patch_script_source(viz_path, src, *, grains_dir=None, bodies_dir=None,
-                        manifest=None, camera_mode="auto", resolution=None, max_frames=None):
+                        manifest=None, camera_mode="auto", resolution=None, max_frames=None,
+                        slowmo=1):
     """Return src with this path's config constants replaced. Pure — no bpy."""
     if viz_path == "per_sphere":
         src = _sub_exactly_once(_GRAINS_DIR_RE, f"GRAINS_DIR = {grains_dir!r}", src, "GRAINS_DIR")
@@ -382,7 +477,8 @@ def patch_script_source(viz_path, src, *, grains_dir=None, bodies_dir=None,
     if viz_path == "instance":
         # One timeline frame == one sim frame, so --max-frames and the TUI's
         # frame count stay correct.
-        src = _sub_exactly_once(_SLOWMO_FACTOR_RE, "SLOWMO_FACTOR = 1", src, "SLOWMO_FACTOR")
+        # (--slowmo N: N timeline frames per dump, in-betweens on the grains' Bezier curves)
+        src = _sub_exactly_once(_SLOWMO_FACTOR_RE, f"SLOWMO_FACTOR = {int(slowmo)}", src, "SLOWMO_FACTOR")
         if resolution is not None:
             src = _sub_exactly_once(
                 _RENDER_RESOLUTION_RE,
@@ -466,6 +562,8 @@ def main() -> None:
         "resolution": (res_x, res_y),
         "max_frames": args.max_frames,
     }
+    if args.viz_path == "instance":
+        patch_kwargs["slowmo"] = args.slowmo
     if args.viz_path == "per_sphere":
         patch_kwargs["grains_dir"] = str(Path(args.grains_dir).resolve()).replace("\\", "/") + "/"
         patch_kwargs["bodies_dir"] = str(Path(args.bodies_dir).resolve()).replace("\\", "/") + "/"
@@ -487,6 +585,8 @@ def main() -> None:
 
     scene = bpy.context.scene
     require_camera(scene)
+    if args.viz_path == "instance":
+        apply_slowmo_range(scene, args.slowmo)
     if args.max_frames is not None:
         scene.frame_end = min(scene.frame_end, scene.frame_start + args.max_frames - 1)
 
@@ -494,7 +594,10 @@ def main() -> None:
         setup_cycles_cpu(scene)
     else:
         setup_cycles_gpu(scene)
+        apply_gpu_denoise(scene)
     scene.cycles.samples = args.samples
+    apply_render_speedups(scene)
+    cap_image_textures(bpy.data.images)
     scene.render.resolution_x = res_x
     scene.render.resolution_y = res_y
     scene.render.resolution_percentage = 100
@@ -509,6 +612,7 @@ def main() -> None:
     scene.render.image_settings.media_type = 'IMAGE'
     scene.render.image_settings.file_format = 'PNG'
     scene.render.filepath = str(out_dir) + "/frame_"
+    apply_resume(scene, args.resume)
 
     print(render_banner(args.viz_path, scene.frame_start, scene.frame_end, res_x, res_y,
                         args.samples, args.device, out_dir))
