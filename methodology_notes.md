@@ -309,7 +309,10 @@ angle, `big_omega = posang_ascnode + π/2`). Nutation and polar motion are left 
 (< 0.01°). Check: at closest approach (21:44 UT, 13 Apr 2029) the sub-Apophis point is
 42.5°W 28.6°N (mid-Atlantic), and Europe/Africa are on the night side. Hyperbola runs (no
 Sun row) keep the sidereal rate, but their time of day is arbitrary. The Atmosphere shell is
-not rotated: it is spherically symmetric.
+not rotated: it is spherically symmetric. A bodies CSV without `time_s` gets no spin. Blender
+interpolates the quaternion keys per component, which still turns the right way up to 360°
+between keys and backwards beyond it, so `earth_orientation.SpinStepCheck` warns once per run
+when keys are more than 180° of spin apart (uneven) or 360° (backwards).
 
 **Moon and Sun visual body.** A grey UV sphere represents the Moon, scaled to
 `MOON_PHYSICAL_RADIUS_KM × EARTH_VIS_SCALE`. An emissive white UV sphere represents

@@ -50,7 +50,9 @@ python3 sobol/setup_paths.py --data-dir <pack>/data --blender <path to blender> 
 python3 sobol/setup_paths.py --check
 ```
 
-This writes `Code/local_paths.json`, which git ignores. Every row in `--check` must
+This writes `Code/local_paths.json`, which git ignores. Paths can be relative, `~/...` or
+`C:/...` (read as `/mnt/c/...` under WSL). In the prompt mode, Enter keeps the current
+value; `assets_dir` and `preprocess_python` left unset follow `data_dir`. Every row in `--check` must
 say `OK`; rows marked `warn` are optional assets. Keys, and the env vars that
 override them:
 
@@ -77,7 +79,7 @@ python3 sobol/render_dumps.py <pack>/example_run/run_0001 --name example \
 ```
 
 Frames land in `<data_dir>/DEMCSVs/example/run_0001_render_instance_grains/`. Relative paths are fine; the tools store and pass absolute ones. If an optional asset was missing, the result line ends with `WARNING missing assets (plain fallback): ...`.
-Drop `--max-frames` for the full run, raise `--samples` (default 500) for less
+Drop `--max-frames` for the full run, raise `--samples` (default 124) for less
 noise, and add `--video` for an mp4. `--paths instance_grains composite` also
 renders the composite view (envelope mesh plus ejecta).
 
