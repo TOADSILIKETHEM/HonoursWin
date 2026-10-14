@@ -51,7 +51,7 @@ docs/             BATCHES_VIZ.md (canonical datasets), PIPELINE_REFERENCE.md, BL
 | `DEMBulkVizBlender.py` | Composite (D3): envelope meshes + GN ejecta; set `VIZ_MANIFEST` |
 | `DEMBulkInstanceBlender.py` | Pure instancing, `static: true/false`; needs "Procedural rock" pre-appended; `SLOWMO_FACTOR`, `RENDER_RESOLUTION`. Real grains match the hero script except the instance-only tint `GRAIN_COLOUR_VARIATION` (`../docs/SHARED_FACTS.md` § Visualisation paths); scene pieces from `DEMCinematicSetup.py` (`ensure_sun_lamp`/`ensure_moon`/`ensure_sun_visual`/`add_camera_fill_light`) |
 | `DEMCinematicSetup.py` | Shared Earth/Moon/Sun + camera module (imported, not run) |
-| `DEMHeadlessRender.py` | Headless driver for the TUI: `--viz-path composite\|instance` (default `instance`), text-patches + `exec`s the script, HDRI world, OPTIX/CUDA GPU-only, optional `--encode-video`. Does not patch `GRAIN_COLOUR_VARIATION` |
+| `DEMHeadlessRender.py` | Headless driver for the TUI: `--viz-path composite\|instance` (default `instance`), text-patches + `exec`s the script, HDRI world, OPTIX/CUDA GPU-only, optional `--encode-video`; `--camera-mode auto|grain_only|earth_fixed|earth_chase` (one per run; `earth_chase` = behind Apophis aimed at Earth, framing `viz/camera_framing.py`) + `--camera-fov DEG`. Does not patch `GRAIN_COLOUR_VARIATION` |
 | `P0_InstancingSpike.py` | Headless GN-instancing benchmark → OneDrive `docs/P0_*` (generated, not git) |
 | `OnlyEarth_ApophisTrueSize.py`, `CSVtoBlender.py`, `workinglargescaleimport.py`, `Camera.py`, `Viewport.py` | Point-mass pipeline |
 | `MaterialandSubsivision.py` | Post-import modifiers/materials on grains |

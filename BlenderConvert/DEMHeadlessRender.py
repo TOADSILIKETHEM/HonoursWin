@@ -6,14 +6,14 @@ Run with:
         [--viz-path composite|instance] \\
         [--manifest PATH/manifest.json] \\
         [--resolution 1920x1080] [--samples 124] [--fps 24] \\
-        [--max-frames N] [--camera-mode auto|grain_only] \\
+        [--max-frames N] [--camera-mode auto|grain_only|earth_fixed|earth_chase] [--camera-fov DEG] \\
         [--device gpu|cpu] [--encode-video] [--video-fps N]
 
 Text-patches the chosen Blender script's config constants and exec()s it —
 the same technique sobol/Analysis/run_demtocsv_batch.py uses on
 DEMDumpConvert.py:
-  composite  -> DEMBulkVizBlender.py         (VIZ_MANIFEST, CAMERA_MODE)
-  instance   -> DEMBulkInstanceBlender.py    (VIZ_MANIFEST, CAMERA_MODE,
+  composite  -> DEMBulkVizBlender.py         (VIZ_MANIFEST, CAMERA_MODE, CAMERA_FOV_DEG)
+  instance   -> DEMBulkInstanceBlender.py    (VIZ_MANIFEST, CAMERA_MODE, CAMERA_FOV_DEG,
                                               SLOWMO_FACTOR=1, RENDER_RESOLUTION)
 GRAIN_COLOUR_VARIATION stays True. The headless driver does not patch it.
 DEMGrainsBlenderEarthCam.py is the GUI hero-shot script. patch_script_source
@@ -84,6 +84,10 @@ _CAMERA_MODE_RE = r"(?m)^CAMERA_MODE\s*=\s*None\b"
 _SLOWMO_FACTOR_RE = r"(?m)^SLOWMO_FACTOR\s*=\s*\d+"
 _RENDER_RESOLUTION_RE = r"(?m)^RENDER_RESOLUTION\s*=\s*\([^)]*\)"
 _MAX_FRAMES_RE = r"(?m)^MAX_FRAMES\s*=\s*None\b"
+_CAMERA_FOV_RE = r"(?m)^CAMERA_FOV_DEG\s*=\s*None\b"
+
+CAMERA_MODES = ("auto", "grain_only", "earth_fixed", "earth_chase")
+DEFAULT_CAMERA_FOV_DEG = 70.0  # = DEMCinematicSetup.CAMERA_FOV_DEG
 
 
 # Blender's startup scene (loaded by `blender --background` with no .blend).
@@ -398,6 +402,8 @@ def validate_args(args) -> None:
         raise ValueError("--slowmo must be >= 1")
     if args.slowmo != 1 and args.viz_path != "instance":
         raise ValueError("--slowmo needs --viz-path instance (composite holds each dump)")
+    if not 1.0 <= args.camera_fov <= 150.0:
+        raise ValueError("--camera-fov must be between 1 and 150 degrees")
     if not args.manifest:
         raise ValueError(f"--viz-path {args.viz_path} requires --manifest")
     manifest_path = Path(args.manifest)
@@ -423,7 +429,14 @@ def _parse_args():
     p.add_argument("--slowmo", type=int, default=1,
                    help="instance only: N timeline frames per dump (same sim time, N x the frames; "
                         "in-betweens interpolated on the grains' Bezier curves, not simulated)")
-    p.add_argument("--camera-mode", choices=("auto", "grain_only"), default="auto")
+    p.add_argument("--camera-mode", choices=CAMERA_MODES, default="auto",
+                   help="auto: track Apophis (Earth-side view when Earth is in the bodies CSV); "
+                        "grain_only: track Apophis, no Earth framing; earth_fixed: camera still "
+                        "relative to Earth, framed on the path near closest approach (Apophis is "
+                        "a few pixels); earth_chase: behind Apophis, aimed at Earth's centre")
+    p.add_argument("--camera-fov", type=float, default=DEFAULT_CAMERA_FOV_DEG,
+                   help="field of view across the long side, degrees (earth_chase: narrower = "
+                        "telephoto, same Apophis size, bigger Earth)")
     p.add_argument("--device", choices=("gpu", "cpu"), default=honours_paths.cycles_device(),
                    help="Cycles device: gpu (OPTIX/CUDA/HIP/ONEAPI/METAL) or cpu (no GPU); "
                         "default cycles_device from Code/local_paths.json, else gpu")
@@ -453,7 +466,7 @@ def _sub_exactly_once(pattern: str, replacement: str, src: str, label: str) -> s
 
 def patch_script_source(viz_path, src, *, grains_dir=None, bodies_dir=None,
                         manifest=None, camera_mode="auto", resolution=None, max_frames=None,
-                        slowmo=1):
+                        slowmo=1, camera_fov=DEFAULT_CAMERA_FOV_DEG):
     """Return src with this path's config constants replaced. Pure — no bpy."""
     if viz_path == "per_sphere":
         src = _sub_exactly_once(_GRAINS_DIR_RE, f"GRAINS_DIR = {grains_dir!r}", src, "GRAINS_DIR")
@@ -482,10 +495,14 @@ def patch_script_source(viz_path, src, *, grains_dir=None, bodies_dir=None,
                 f"RENDER_RESOLUTION = ({int(resolution[0])}, {int(resolution[1])})",
                 src, "RENDER_RESOLUTION",
             )
-    if camera_mode == "grain_only":
+    if camera_mode != "auto":
         # CAMERA_MODE is a separate switch from IMPORT_SOLAR_SYSTEM -- it
         # forces camera behavior, not whether solar-system bodies are imported.
-        src = _sub_exactly_once(_CAMERA_MODE_RE, "CAMERA_MODE = 'grain_only'", src, "CAMERA_MODE")
+        if camera_mode not in CAMERA_MODES:
+            raise ValueError(f"camera_mode {camera_mode!r} not in {CAMERA_MODES}")
+        src = _sub_exactly_once(_CAMERA_MODE_RE, f"CAMERA_MODE = {camera_mode!r}", src, "CAMERA_MODE")
+    if viz_path != "per_sphere" and float(camera_fov) != DEFAULT_CAMERA_FOV_DEG:
+        src = _sub_exactly_once(_CAMERA_FOV_RE, f"CAMERA_FOV_DEG = {float(camera_fov)!r}", src, "CAMERA_FOV_DEG")
     return src
 
 
@@ -602,6 +619,7 @@ def main() -> None:
     out_dir = Path(args.output_dir).resolve()
     patch_kwargs = {
         "camera_mode": args.camera_mode,
+        "camera_fov": args.camera_fov,
         "resolution": (res_x, res_y),
         "max_frames": args.max_frames,
         "manifest": str(Path(args.manifest).resolve()).replace("\\", "/"),

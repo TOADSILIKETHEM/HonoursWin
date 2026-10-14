@@ -42,6 +42,7 @@ BODIES_CSV_DIR = None   # None = resolve from manifest bodies_csv_dir
 IMPORT_SOLAR_SYSTEM = None
 SETUP_CAMERA = True
 CAMERA_MODE = None
+CAMERA_FOV_DEG = None  # None = DEMCinematicSetup.CAMERA_FOV_DEG (70); across the frame's long side
 USE_FRAME_CHANGE_HANDLER = True
 
 GRAIN_COLOR = (0.35, 0.30, 0.25, 1.0)
@@ -340,7 +341,8 @@ def main():
                 pts = np.column_stack([d['x_vis'], d['y_vis'], d['z_vis']]).astype(np.float64)
                 return cinematic.grain_core(pts, CORE_GRAIN_FRACTION)
             cinematic.setup_camera(
-                len(grain_files), _core_fn, earth_empty, has_solar, camera_mode=CAMERA_MODE
+                len(grain_files), _core_fn, earth_empty, has_solar, camera_mode=CAMERA_MODE,
+                fov_deg=CAMERA_FOV_DEG,
             )
         scene.frame_set(scene.frame_start)
 

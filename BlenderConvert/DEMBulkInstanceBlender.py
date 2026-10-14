@@ -52,6 +52,7 @@ BODIES_CSV_DIR = None
 IMPORT_SOLAR_SYSTEM = None
 SETUP_CAMERA = True
 CAMERA_MODE = None
+CAMERA_FOV_DEG = None  # None = DEMCinematicSetup.CAMERA_FOV_DEG (70); across the frame's long side
 RENDER_RESOLUTION = (1920, 1080)
 # Time remap: stretch the same n_frames of real data over
 # n_frames * SLOWMO_FACTOR timeline frames (Blender's built-in frame_map_old/new),
@@ -624,7 +625,7 @@ def main():
                 return cinematic.grain_core(pts.astype(np.float64), CORE_GRAIN_FRACTION)
             cam_obj = cinematic.setup_camera(
                 len(frame_ids), _core_fn, earth_empty, has_solar, camera_mode=CAMERA_MODE,
-                rotation_interp=CAMERA_ROTATION_INTERP,
+                rotation_interp=CAMERA_ROTATION_INTERP, fov_deg=CAMERA_FOV_DEG,
             )
             if SETUP_CAM_FILL_LIGHT:
                 cinematic.add_camera_fill_light(cam_obj)

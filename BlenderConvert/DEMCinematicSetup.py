@@ -25,6 +25,7 @@ _CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 import honours_paths  # noqa: E402
+from viz import camera_framing  # noqa: E402
 
 # -- Configuration (same defaults DEMBulkVizBlender.py already used) --------
 # Asset folder from Code/honours_paths.py (default: Max's OneDrive BlenderConvert/).
@@ -48,6 +49,24 @@ CAM_GRAIN_ONLY_AZIMUTH_DEG = 45.0
 CAM_GRAIN_ONLY_ELEVATION_DEG = 20.0
 CAM_CLIP_START = 0.01
 CAM_CLIP_END = 20_000_000.0
+# camera_mode 'earth_fixed': camera parented to the Earth empty, one fixed pose
+# framing Earth + the part of Apophis's path near Earth (viz/camera_framing.py):
+# within EARTH_FIXED_WINDOW_KM of Earth's centre, or, when that is None, within
+# EARTH_FIXED_WINDOW_CA_FACTOR x the closest-approach distance (None too = whole
+# path). Apophis is simply out of shot outside the window.
+EARTH_FIXED_WINDOW_KM = None
+EARTH_FIXED_WINDOW_CA_FACTOR = 3.0
+EARTH_FIXED_TILT_DEG = 20.0
+EARTH_FIXED_MARGIN = 1.15
+EARTH_FIXED_SUBSAMPLES = 8  # Earth positions sampled per key interval for the framing
+# camera_mode 'earth_chase': over-the-shoulder -- camera behind Apophis on the
+# Earth line, aimed at Earth's centre (Earth stays mid-frame), raised along the
+# orbit normal so Apophis sits EARTH_CHASE_DROP of the half-height below the middle
+# (1/3 = lower third). Distance = CAM_DIST_BU at CAMERA_FOV_DEG, scaled by
+# 1/tan(fov/2), so a narrower fov keeps Apophis's size and magnifies Earth.
+EARTH_CHASE_DROP = 1.0 / 3.0
+EARTH_AIM_NAME = 'DEM_EarthAim'  # Empty on Earth whose Z is the chase camera's screen-up
+CAMERA_MODES = ('earth_track', 'grain_only', 'earth_fixed', 'earth_chase')
 # Below: per-sphere-only scene pieces (DEMGrainsBlenderEarthCam.py values),
 # opt-in via ensure_sun_lamp / ensure_moon / ensure_sun_visual /
 # add_camera_fill_light / apply_viewport_clip so the composite path is unchanged.
@@ -352,8 +371,10 @@ CAMERA_AIM_NAME = 'DEM_CameraAim'  # Empty the camera's Track To follows (see se
 
 
 def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None,
-                 rotation_interp=None):
+                 rotation_interp=None, fov_deg=None):
     """Keyframe a tracking camera. ``core_fn(i)`` returns the frame-``i`` aim point.
+
+    ``fov_deg`` (None = CAMERA_FOV_DEG) is the field of view across the frame's long side.
 
     ``rotation_interp`` (e.g. 'LINEAR', what DEMGrainsBlenderEarthCam.py uses)
     overrides the rotation keys' interpolation; None keeps Blender's default.
@@ -372,7 +393,7 @@ def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None,
     scene = bpy.context.scene
     cam_data = bpy.data.cameras.get(CAMERA_NAME) or bpy.data.cameras.new(CAMERA_NAME)
     cam_data.lens_unit = 'FOV'
-    cam_data.angle = math.radians(CAMERA_FOV_DEG)
+    cam_data.angle = math.radians(CAMERA_FOV_DEG if fov_deg is None else fov_deg)
     cam_data.clip_start = CAM_CLIP_START
     cam_data.clip_end = CAM_CLIP_END
     cam_obj = bpy.data.objects.get(CAMERA_NAME)
@@ -383,6 +404,14 @@ def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None,
         cam_obj.data = cam_data
     cam_obj.rotation_mode = 'QUATERNION'
     scene.camera = cam_obj
+
+    if camera_mode is not None and camera_mode not in CAMERA_MODES:
+        raise ValueError(f'camera_mode={camera_mode!r}; expected None or one of {CAMERA_MODES}')
+    if camera_mode == 'earth_fixed':
+        return _setup_earth_fixed_camera(cam_obj, frame_count, earth_empty)
+    if camera_mode == 'earth_chase':
+        return _setup_earth_chase_camera(cam_obj, frame_count, core_fn, earth_empty)
+    _clear_tracking(cam_obj)  # an earlier earth_fixed / earth_chase run in this scene
 
     use_earth = (
         camera_mode == 'earth_track'
@@ -451,6 +480,106 @@ def setup_camera(frame_count, core_fn, earth_empty, has_solar, camera_mode=None,
     track.target = aim
     track.track_axis = 'TRACK_NEGATIVE_Z'
     track.up_axis = 'UP_Y'
+    return cam_obj
+
+
+def _clear_tracking(cam_obj):
+    """Drop a camera's keys, DEM_ Track To constraints and parent (a re-run in the same scene)."""
+    if cam_obj.animation_data is not None:
+        cam_obj.animation_data_clear()
+    for con in [c for c in cam_obj.constraints if c.name.startswith('DEM_')]:
+        cam_obj.constraints.remove(con)
+    cam_obj.parent = None
+
+
+def _need_earth(earth_empty, camera_mode):
+    if earth_empty is None:
+        raise ValueError(
+            f"camera_mode {camera_mode!r} needs Earth, but the bodies CSV has no Earth row "
+            "(apophis_only run?)"
+        )
+
+
+def _setup_earth_chase_camera(cam_obj, frame_count, core_fn, earth_empty):
+    """Over-the-shoulder chase: keyed behind the core on the Earth line, Track To on Earth.
+
+    The Track To targets an Empty parented to Earth (EARTH_AIM_NAME) with use_target_z,
+    whose Z is the orbit normal, so Earth is centred on every frame (also between keys
+    under --slowmo) and screen-up stays the orbit normal, which the Earth line never
+    crosses. Call at 1:1 time (before any frame_map), like setup_camera.
+    """
+    _need_earth(earth_empty, 'earth_chase')
+    scene = bpy.context.scene
+    _clear_tracking(cam_obj)
+    n = min(scene.frame_end - scene.frame_start + 1, frame_count)
+    cores, earths = [], []
+    for i in range(n):
+        scene.frame_set(scene.frame_start + i)
+        cores.append(tuple(core_fn(i)))
+        earths.append(tuple(earth_empty.matrix_world.translation))
+    aspect = scene.render.resolution_x / max(1, scene.render.resolution_y)
+    offsets, up = camera_framing.earth_chase_offsets(
+        cores, earths, cam_obj.data.angle, aspect, ref_fov_rad=math.radians(CAMERA_FOV_DEG),
+        ref_dist_bu=CAM_DIST_BU, drop=EARTH_CHASE_DROP,
+    )
+    for i in range(n):
+        cam_obj.location = Vector(cores[i]) + Vector(offsets[i])
+        cam_obj.keyframe_insert(data_path='location', frame=scene.frame_start + i)
+
+    aim = bpy.data.objects.get(EARTH_AIM_NAME)
+    if aim is None:
+        aim = bpy.data.objects.new(EARTH_AIM_NAME, None)
+        scene.collection.objects.link(aim)
+    aim.parent = earth_empty
+    aim.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+    aim.location = (0.0, 0.0, 0.0)
+    aim.rotation_mode = 'QUATERNION'
+    aim.rotation_quaternion = Vector(up).to_track_quat('Z', 'Y')
+    track = cam_obj.constraints.new('TRACK_TO')
+    track.name = 'DEM_AimAtEarth'
+    track.target = aim
+    track.track_axis = 'TRACK_NEGATIVE_Z'
+    track.up_axis = 'UP_Y'
+    track.use_target_z = True
+    scene.frame_set(scene.frame_start)
+    print(f'Camera mode: Earth chase ({n} frames, {Vector(offsets[0]).length:.0f} BU behind the core, '
+          f'fov {math.degrees(cam_obj.data.angle):.0f} deg).')
+    return cam_obj
+
+
+def _setup_earth_fixed_camera(cam_obj, frame_count, earth_empty):
+    """Parent the camera to the Earth empty at one pose that frames Earth + Apophis's path.
+
+    The Earth empty only translates (its Surface/Clouds children carry the spin), so
+    Earth stays still on screen and Apophis (at the scene origin) crosses the frame.
+    Reads the empty's keyed positions, so call it at 1:1 time (before any frame_map).
+    """
+    _need_earth(earth_empty, 'earth_fixed')
+    scene = bpy.context.scene
+    _clear_tracking(cam_obj)
+    n = min(scene.frame_end - scene.frame_start + 1, frame_count)
+    # Sample between keys too: Earth's Bezier location curve bulges past the keyed
+    # points, and a --slowmo or motion-blur frame shows those in-betweens.
+    earth_pos = []
+    for i in range(n):
+        for k in range(EARTH_FIXED_SUBSAMPLES if i < n - 1 else 1):
+            scene.frame_set(scene.frame_start + i, subframe=k / EARTH_FIXED_SUBSAMPLES)
+            earth_pos.append(tuple(earth_empty.matrix_world.translation))
+    aspect = scene.render.resolution_x / max(1, scene.render.resolution_y)
+    window_bu = None if EARTH_FIXED_WINDOW_KM is None else EARTH_FIXED_WINDOW_KM * EARTH_VIS_SCALE
+    offset, right, up = camera_framing.earth_fixed_pose(
+        earth_pos, EARTH_PHYSICAL_RADIUS_KM * EARTH_VIS_SCALE, cam_obj.data.angle, aspect,
+        tilt_deg=EARTH_FIXED_TILT_DEG, margin=EARTH_FIXED_MARGIN, window_bu=window_bu,
+        window_ca_factor=EARTH_FIXED_WINDOW_CA_FACTOR,
+    )
+    right, up = Vector(right), Vector(up)
+    rot = mathutils.Matrix((right, up, right.cross(up))).transposed()  # columns = local X, Y, Z
+    cam_obj.parent = earth_empty
+    cam_obj.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+    cam_obj.location = Vector(offset)
+    cam_obj.rotation_quaternion = rot.to_quaternion()
+    scene.frame_set(scene.frame_start)
+    print(f'Camera mode: Earth-fixed ({n} frames framed, {Vector(offset).length:.0f} BU from Earth).')
     return cam_obj
 
 
