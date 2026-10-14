@@ -113,7 +113,7 @@ renders the composite view (envelope mesh plus ejecta).
 
 ## Other entry points
 
-- `sobol/tui_sim_render.py` runs a PHANTOM sim, converts it and renders, all in one terminal UI. It needs a PHANTOM build (`sobol/CLAUDE.md`). It is also the only route to the `per_sphere` and `instance_static` render paths.
+- `sobol/tui_sim_render.py` runs a PHANTOM sim, converts it and renders, all in one terminal UI. It needs a PHANTOM build (`sobol/CLAUDE.md`). It is also the only route to the `instance_static` render path. The GUI hero script is `BlenderConvert/DEMGrainsBlenderEarthCam.py`.
 - The Blender scripts in `BlenderConvert/` can be pasted into Blender's Scripting tab. Set the paths in their Configuration block. If Blender is started outside this checkout, set `HONOURS_CODE_DIR` first.
 - The point-mass scripts (`CSVconvert/ToCSVFirst.py`, `BlenderConvert/CSVtoBlender.py`, `OnlyEarth_ApophisTrueSize.py`, `workinglargescaleimport.py`) are legacy. Edit the constants at the top of each.
 

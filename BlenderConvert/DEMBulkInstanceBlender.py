@@ -71,10 +71,13 @@ GRAIN_UV_SEGMENTS = 12
 GRAIN_UV_RINGS = 8
 PROCEDURAL_ROCK_MAT_NAME = 'Procedural rock'
 INSTANCE_MAT_NAME = 'DEM_GrainInstance'
-# Per-grain colour variation, keyed on Object Info Random (one value per
-# instance in Cycles): HSV value/hue/saturation ranges, then a multiply tint
-# between two colours. 'Procedural rock' is greyscale, so hue/sat only bite
-# if the base gains colour; value + tint do the visible work.
+# Instance-only per-grain colour variation (DEMGrainsBlenderEarthCam.py has none).
+# Always on. Keyed on Object Info Random (one value per instance in Cycles): HSV
+# value/hue/saturation ranges, then a multiply tint between two colours.
+# 'Procedural rock' is greyscale, so hue/sat only bite if the base gains
+# colour; value + tint do the visible work. Parity checks mesh, motion and
+# scene. Rendered pixels are not compared to the hero script.
+GRAIN_COLOUR_VARIATION = True
 GRAIN_VAR_VALUE_RANGE = (0.85, 1.15)
 GRAIN_VAR_HUE_RANGE = (0.48, 0.52)
 GRAIN_VAR_SAT_RANGE = (0.9, 1.1)
@@ -222,7 +225,8 @@ def _instance_rock_material(src):
         nt.links.new(attr.outputs['Fac'], scale.inputs['Scale'])
         for sock in targets:
             nt.links.new(scale.outputs['Vector'], sock)
-    _add_grain_colour_variation(nt)
+    if GRAIN_COLOUR_VARIATION:
+        _add_grain_colour_variation(nt)
     return mat
 
 

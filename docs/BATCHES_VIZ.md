@@ -90,7 +90,7 @@ One frame index (`00000`, `00001`, …) per sorted grain npz file in `_grains_ou
 
 Earth model: `BlenderConvert/TheEarth1.blend` (appended automatically when solar system is detected).
 
-## Per-sphere workflow (manual GUI; TUI default is `instance_grains`, per-sphere = parity reference)
+## Per-sphere workflow (GUI hero shots only; TUI default is `instance_grains`)
 
 1. Open `BlenderConvert/DEMGrainsBlenderEarthCam.py`
 2. Set `GRAINS_DIR` and `BODIES_CSV_DIR` to the chosen `run_XXXX_*_output/` paths

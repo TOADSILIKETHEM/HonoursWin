@@ -1,11 +1,10 @@
-"""Headless DEM render (per-sphere, composite, or instance) — not pasted into the Scripting tab.
+"""Headless DEM render (composite or instance) — not pasted into the Scripting tab.
 
 Run with:
     blender.exe --background --python BlenderConvert/DEMHeadlessRender.py -- \\
         --output-dir PATH \\
-        [--viz-path per_sphere|composite|instance] \\
-        [--grains-dir PATH --bodies-dir PATH]      (per_sphere) \\
-        [--manifest PATH/manifest.json]            (composite / instance) \\
+        [--viz-path composite|instance] \\
+        [--manifest PATH/manifest.json] \\
         [--resolution 1920x1080] [--samples 124] [--fps 24] \\
         [--max-frames N] [--camera-mode auto|grain_only] \\
         [--device gpu|cpu] [--encode-video] [--video-fps N]
@@ -13,11 +12,13 @@ Run with:
 Text-patches the chosen Blender script's config constants and exec()s it —
 the same technique sobol/Analysis/run_demtocsv_batch.py uses on
 DEMDumpConvert.py:
-  per_sphere -> DEMGrainsBlenderEarthCam.py  (GRAINS_DIR, BODIES_CSV_DIR, CAMERA_MODE,
-                                              MAX_FRAMES)
   composite  -> DEMBulkVizBlender.py         (VIZ_MANIFEST, CAMERA_MODE)
   instance   -> DEMBulkInstanceBlender.py    (VIZ_MANIFEST, CAMERA_MODE,
                                               SLOWMO_FACTOR=1, RENDER_RESOLUTION)
+GRAIN_COLOUR_VARIATION stays True. The headless driver does not patch it.
+DEMGrainsBlenderEarthCam.py is the GUI hero-shot script. patch_script_source
+("per_sphere") still rewrites its constants so the parity test can build the
+reference scene; the CLI does not run that path.
 Then applies World "Deep Dark Space with Stars.001" (same HDRI as
 Apophisonly.blend), sets Cycles to the first GPU backend found (OPTIX, CUDA,
 HIP, ONEAPI, METAL; GPU only, no CPU hybrid) or, with --device cpu, the CPU,
@@ -48,7 +49,9 @@ _HDRI_RELATIVE = Path(
     "deep-dark-space-with-stars_4K_56e0040f-4645-4b62-b685-637b0eb970ed.exr"
 )
 
-VIZ_PATHS = ("per_sphere", "composite", "instance")
+VIZ_PATHS = ("composite", "instance")
+# "per_sphere" is not a CLI path. The parity test patches DEMGrainsBlenderEarthCam.py
+# through SCRIPT_FOR_VIZ_PATH / patch_script_source and renders with render_prepared_scene.
 SCRIPT_FOR_VIZ_PATH = {
     "per_sphere": "DEMGrainsBlenderEarthCam.py",
     "composite": "DEMBulkVizBlender.py",
@@ -394,11 +397,7 @@ def validate_args(args) -> None:
     if args.slowmo < 1:
         raise ValueError("--slowmo must be >= 1")
     if args.slowmo != 1 and args.viz_path != "instance":
-        raise ValueError("--slowmo needs --viz-path instance (composite/per_sphere hold each dump)")
-    if args.viz_path == "per_sphere":
-        if not args.grains_dir or not args.bodies_dir:
-            raise ValueError("--viz-path per_sphere requires --grains-dir and --bodies-dir")
-        return
+        raise ValueError("--slowmo needs --viz-path instance (composite holds each dump)")
     if not args.manifest:
         raise ValueError(f"--viz-path {args.viz_path} requires --manifest")
     manifest_path = Path(args.manifest)
@@ -414,10 +413,8 @@ def validate_args(args) -> None:
 def _parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--viz-path", choices=VIZ_PATHS, default="per_sphere")
+    p.add_argument("--viz-path", choices=VIZ_PATHS, default="instance")
     p.add_argument("--manifest", default=None)
-    p.add_argument("--grains-dir", default=None)
-    p.add_argument("--bodies-dir", default=None)
     p.add_argument("--output-dir", required=True)
     p.add_argument("--resolution", default="1920x1080")
     p.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
@@ -543,6 +540,52 @@ def _line_buffer_std_streams() -> None:
             reconfigure(line_buffering=True)
 
 
+def render_prepared_scene(scene, *, viz_path, out_dir, res_x, res_y, samples, fps, device,
+                          max_frames=None, slowmo=1, resume=False, encode=False, video_fps=None):
+    """Cycles settings and the PNG render, after a viz script has built the scene.
+
+    The parity test calls this for the hero script (viz_path "per_sphere"), which
+    the CLI does not run. Bulk paths lock the interface because their
+    frame_change_pre handlers rewrite meshes during the animation render.
+    """
+    require_camera(scene)
+    if viz_path == "instance":
+        apply_slowmo_range(scene, slowmo)
+    if max_frames is not None:
+        scene.frame_end = min(scene.frame_end, scene.frame_start + max_frames - 1)
+
+    if device == "cpu":
+        setup_cycles_cpu(scene)
+    else:
+        setup_cycles_gpu(scene)
+        apply_gpu_denoise(scene)
+    scene.cycles.samples = samples
+    apply_render_speedups(scene)
+    cap_image_textures(bpy.data.images)
+    scene.render.resolution_x = res_x
+    scene.render.resolution_y = res_y
+    scene.render.resolution_percentage = 100
+    scene.render.fps = fps
+    if viz_path != "per_sphere":
+        scene.render.use_lock_interface = True
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    scene.render.image_settings.media_type = 'IMAGE'
+    scene.render.image_settings.file_format = 'PNG'
+    scene.render.filepath = str(out_dir) + "/frame_"
+    apply_resume(scene, resume)
+
+    print(render_banner(viz_path, scene.frame_start, scene.frame_end, res_x, res_y,
+                        samples, device, out_dir))
+    bpy.ops.render.render(animation=True)
+    n_frames = scene.frame_end - scene.frame_start + 1
+    print(f"[DEMHeadlessRender] Done — {n_frames} frame(s) written to {out_dir}")
+
+    if encode:
+        encode_video(out_dir, n_frames, video_fps if video_fps is not None else fps)
+
+
 def main() -> None:
     _line_buffer_std_streams()
     args = _parse_args()
@@ -561,14 +604,10 @@ def main() -> None:
         "camera_mode": args.camera_mode,
         "resolution": (res_x, res_y),
         "max_frames": args.max_frames,
+        "manifest": str(Path(args.manifest).resolve()).replace("\\", "/"),
     }
     if args.viz_path == "instance":
         patch_kwargs["slowmo"] = args.slowmo
-    if args.viz_path == "per_sphere":
-        patch_kwargs["grains_dir"] = str(Path(args.grains_dir).resolve()).replace("\\", "/") + "/"
-        patch_kwargs["bodies_dir"] = str(Path(args.bodies_dir).resolve()).replace("\\", "/") + "/"
-    else:
-        patch_kwargs["manifest"] = str(Path(args.manifest).resolve()).replace("\\", "/")
 
     removed = remove_startup_defaults()
     if removed:
@@ -582,47 +621,11 @@ def main() -> None:
     )
     exec(compile(src, str(script_path), "exec"), {"__name__": "__main__", "__file__": str(script_path)})
     setup_deep_dark_space_world()
-
-    scene = bpy.context.scene
-    require_camera(scene)
-    if args.viz_path == "instance":
-        apply_slowmo_range(scene, args.slowmo)
-    if args.max_frames is not None:
-        scene.frame_end = min(scene.frame_end, scene.frame_start + args.max_frames - 1)
-
-    if args.device == "cpu":
-        setup_cycles_cpu(scene)
-    else:
-        setup_cycles_gpu(scene)
-        apply_gpu_denoise(scene)
-    scene.cycles.samples = args.samples
-    apply_render_speedups(scene)
-    cap_image_textures(bpy.data.images)
-    scene.render.resolution_x = res_x
-    scene.render.resolution_y = res_y
-    scene.render.resolution_percentage = 100
-    scene.render.fps = args.fps
-    if args.viz_path != "per_sphere":
-        # The bulk scripts' frame_change_pre handlers rewrite mesh data between
-        # frames during the animation render; lock the interface so the render
-        # never reads half-updated geometry.
-        scene.render.use_lock_interface = True
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    scene.render.image_settings.media_type = 'IMAGE'
-    scene.render.image_settings.file_format = 'PNG'
-    scene.render.filepath = str(out_dir) + "/frame_"
-    apply_resume(scene, args.resume)
-
-    print(render_banner(args.viz_path, scene.frame_start, scene.frame_end, res_x, res_y,
-                        args.samples, args.device, out_dir))
-    bpy.ops.render.render(animation=True)
-    n_frames = scene.frame_end - scene.frame_start + 1
-    print(f"[DEMHeadlessRender] Done — {n_frames} frame(s) written to {out_dir}")
-
-    if args.encode_video:
-        video_fps = args.video_fps if args.video_fps is not None else args.fps
-        encode_video(out_dir, n_frames, video_fps)
+    render_prepared_scene(
+        bpy.context.scene, viz_path=args.viz_path, out_dir=out_dir, res_x=res_x, res_y=res_y,
+        samples=args.samples, fps=args.fps, device=args.device, max_frames=args.max_frames,
+        slowmo=args.slowmo, resume=args.resume, encode=args.encode_video, video_fps=args.video_fps,
+    )
 
 
 if __name__ == "__main__":
