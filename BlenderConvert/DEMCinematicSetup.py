@@ -37,6 +37,12 @@ EARTH_VIS_SCALE = 0.2
 # TDB of sim time_s = 0 (the run's sobol.setup `epoch`); see earth_orientation.py.
 EARTH_EPOCH_TDB = earth_orientation.DEFAULT_EPOCH_TDB
 EARTH_ROTATE_CLOUDS = True
+# TheEarth1.blend maps its land/ocean mask to roughness 1.0 (land) .. 0.1 (ocean),
+# which mirrors the sun lamp as a sharp hotspot. Real sunglint (waves, haze) is a
+# broad faint patch: ocean roughness and Specular IOR Level are overridden on append.
+# None keeps the asset's value.
+EARTH_OCEAN_ROUGHNESS = 0.45
+EARTH_SPECULAR = 0.25
 EARTH_EMPTY_NAME = 'Earth'
 SUN_LAMP_ENERGY = 10.0
 SUN_LAMP_ANGLE = 0.00931
@@ -161,6 +167,30 @@ def _mesh_world_aabb_half_max_extent(obj):
     return max(extent.x, extent.y, extent.z) * 0.5
 
 
+def _soften_ocean_glint(surf):
+    """Apply EARTH_OCEAN_ROUGHNESS / EARTH_SPECULAR to Surface's Principled BSDF."""
+    for slot in surf.material_slots:
+        mat = slot.material
+        if mat is None or mat.node_tree is None:
+            continue
+        for bsdf in (n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'):
+            if EARTH_SPECULAR is not None:
+                bsdf.inputs['Specular IOR Level'].default_value = EARTH_SPECULAR
+            rough = bsdf.inputs['Roughness']
+            if EARTH_OCEAN_ROUGHNESS is None:
+                continue
+            if not rough.is_linked:
+                rough.default_value = EARTH_OCEAN_ROUGHNESS
+                continue
+            src = rough.links[0].from_node
+            if src.type == 'MAP_RANGE':
+                # Mask 1 = ocean -> 'To Max' (float socket; the vector twin shares the name).
+                to_max = next(s for s in src.inputs if s.name == 'To Max' and s.type == 'VALUE')
+                to_max.default_value = EARTH_OCEAN_ROUGHNESS
+            else:
+                print(f'WARNING: Earth roughness fed by {src.type}; ocean glint left as is.')
+
+
 def _append_earth_model(earth_empty, target_radius_bu):
     """Append Surface/Atmosphere/Clouds from EARTH_MODEL_PATH, scaled to target_radius_bu.
 
@@ -199,6 +229,7 @@ def _append_earth_model(earth_empty, target_radius_bu):
         return False
 
     surf = next((o for o in mesh_objs if _object_base_name(o.name) == 'Surface'), mesh_objs[0])
+    _soften_ocean_glint(surf)
     E = earth_empty.matrix_world.translation.copy()
     # Centre the model on the Empty via Surface's bbox centre (per-sphere
     # import_body_model auto_center), so the Earth sits exactly where its
