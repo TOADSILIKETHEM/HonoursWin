@@ -72,6 +72,10 @@ _ROCK_MATERIAL_BLEND_RELATIVE = Path("Blenders/11.blend")
 _CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
+# sun_flare_psf (imported by apply_sun_glare) sits next to this file.
+_BLENDER_CONVERT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BLENDER_CONVERT_DIR not in sys.path:
+    sys.path.insert(0, _BLENDER_CONVERT_DIR)
 import honours_paths  # noqa: E402
 
 ASSETS_DIR = Path(honours_paths.host_path(honours_paths.assets_dir()))
@@ -88,6 +92,28 @@ _CAMERA_FOV_RE = r"(?m)^CAMERA_FOV_DEG\s*=\s*None\b"
 
 CAMERA_MODES = ("auto", "grain_only", "earth_fixed", "earth_chase")
 DEFAULT_CAMERA_FOV_DEG = 70.0  # = DEMCinematicSetup.CAMERA_FOV_DEG
+
+# Compositor glare on the Sun disk (apply_sun_glare), only when the scene has a
+# Sun_Visual. Threshold is scene-linear radiance: a white diffuse surface under the
+# strength-10 sun lamp renders 10 / pi = 3.2, the disk ~1.5e5
+# (sun_geometry.sun_disk_emission_strength), so 100 flares the Sun and nothing lit
+# by it. Glare passes added to the image: Bloom (soft halo), Kernel (a starburst from
+# sun_flare_psf: diffraction of an imperfect 7-blade iris, so the 14 spikes differ in
+# length and brightness) and 7 lens ghosts (sun_flare_psf.ghost_passes: iris-shaped
+# Kernel passes placed on the Sun-centre line by a Transform). Size and strengths are
+# the Glare node's 0..1 inputs; ghost strengths come from sun_flare_psf.GHOSTS. Bloom strength 1 washed out most of
+# a 1080p frame (the disk is ~1500x the threshold); these values keep Apophis and
+# Earth's limb readable (flare sweep on mia_full_B_s1_cb_x0.7/run_0001, Max picked
+# starburst J5 and ghost set gA on 2026-10-21; smaller bloom sizes give square blobs).
+SUN_GLARE_ENABLED = True
+SUN_GLARE_THRESHOLD = 100.0
+SUN_GLARE_BLOOM_SIZE = 0.5
+SUN_GLARE_BLOOM_STRENGTH = 0.005
+SUN_GLARE_STARBURST_STRENGTH = 0.01
+SUN_GLARE_GHOSTS_ENABLED = True
+SUN_GLARE_KERNEL_IMAGE = "DEM_SunStarburst"
+SUN_GLARE_GHOST_IMAGE_PREFIX = "DEM_SunGhost_"
+SUN_GLARE_GROUP_NAME = "DEM_SunGlare"
 
 
 # Blender's startup scene (loaded by `blender --background` with no .blend).
@@ -183,6 +209,104 @@ def setup_deep_dark_space_world(hdri_path=None) -> bool:
     bpy.context.scene.world = world
     bpy.context.scene.view_settings.view_transform = "AgX"
     print(f"[DEMHeadlessRender] World {WORLD_NAME!r} from {abs_path}")
+    return True
+
+
+def _kernel_image(name, rgb):
+    """(h, w, 3) float array as a packed float image (so a saved .blend keeps it; the
+    compositor also ignores an unpacked generated image)."""
+    import numpy as np
+    img = bpy.data.images.get(name)
+    if img is not None:
+        bpy.data.images.remove(img)
+    h, w = rgb.shape[:2]
+    img = bpy.data.images.new(name, w, h, float_buffer=True, alpha=True)
+    rgba = np.concatenate([rgb[::-1], np.ones((h, w, 1), np.float32)], axis=2)
+    img.pixels.foreach_set(rgba.ravel())
+    img.pack()
+    return img
+
+
+def _link_kernel(tree, glare, image):
+    glare.inputs["Kernel Data Type"].default_value = "Color"
+    node = tree.nodes.new("CompositorNodeImage")
+    node.image = image
+    socket = next(s for s in glare.inputs if s.name == "Kernel" and s.type == "RGBA")
+    tree.links.new(node.outputs["Image"], socket)
+
+
+def _glare_pass(tree, image_socket, glare_type, strength, **inputs):
+    glare = tree.nodes.new("CompositorNodeGlare")
+    glare.inputs["Type"].default_value = glare_type
+    glare.inputs["Threshold"].default_value = SUN_GLARE_THRESHOLD
+    glare.inputs["Strength"].default_value = strength
+    for name, value in inputs.items():
+        glare.inputs[name].default_value = value
+    tree.links.new(image_socket, glare.inputs["Image"])
+    return glare
+
+
+# Blender 5.2 compositor (probed 2026-10-20): a scene has no node_tree; it points
+# at a CompositorNodeTree node group via scene.compositing_node_group (None by
+# default), and render.use_compositing (default True) applies it. There is no
+# Composite node: the group's first Image output socket is the result. The Glare
+# node has no glare properties, only input sockets: "Type" (menu: Bloom, Ghosts,
+# Streaks, Fog Glow, Simple Star, Sun Beams, Kernel), "Quality" (Low/Medium/High),
+# "Threshold" (scene-linear), "Smoothness", "Clamp"/"Maximum", "Strength" (0..1),
+# "Size" (0..1, relative to the image), and more per type. Kernel takes an RGBA
+# "Kernel" socket with "Kernel Data Type" = "Color". Its "Glare" output is the
+# glare alone, so the passes are summed onto the image with Mix (Add) nodes.
+def apply_sun_glare(scene) -> bool:
+    """Render Layers + Bloom + starburst Kernel + iris ghosts -> group output on ``scene``,
+    when it has a Sun_Visual.
+
+    Returns False and changes nothing when SUN_GLARE_ENABLED is off or there is no
+    Sun_Visual (apophis_only, no bodies, hyperbola too short to fit). Calling it
+    again rebuilds the same SUN_GLARE_GROUP_NAME group, so there is one of each pass.
+    """
+    if not SUN_GLARE_ENABLED or bpy.data.objects.get("Sun_Visual") is None:
+        return False
+    tree = bpy.data.node_groups.get(SUN_GLARE_GROUP_NAME)
+    if tree is None:
+        tree = bpy.data.node_groups.new(SUN_GLARE_GROUP_NAME, "CompositorNodeTree")
+    tree.nodes.clear()
+    tree.interface.clear()
+    tree.interface.new_socket(name="Image", in_out="OUTPUT", socket_type="NodeSocketColor")
+    layers = tree.nodes.new("CompositorNodeRLayers")
+    layers.scene = scene
+    image = layers.outputs["Image"]
+    import sun_flare_psf
+    bloom = _glare_pass(tree, image, "Bloom", SUN_GLARE_BLOOM_STRENGTH, Size=SUN_GLARE_BLOOM_SIZE)
+    starburst = _glare_pass(tree, image, "Kernel", SUN_GLARE_STARBURST_STRENGTH)
+    _link_kernel(tree, starburst, _kernel_image(SUN_GLARE_KERNEL_IMAGE,
+                                                sun_flare_psf.starburst_psf()))
+    layers_out = [bloom.outputs["Glare"], starburst.outputs["Glare"]]
+    ghosts = sun_flare_psf.ghost_passes() if SUN_GLARE_GHOSTS_ENABLED else []
+    for i, g in enumerate(ghosts):
+        glare = _glare_pass(tree, image, "Kernel", g["strength"], Tint=(*g["tint"], 1.0))
+        _link_kernel(tree, glare, _kernel_image(f"{SUN_GLARE_GHOST_IMAGE_PREFIX}{i}", g["kernel"]))
+        # Scale/rotate about the frame centre: a ghost at k (sun - centre) from the centre.
+        place = tree.nodes.new("CompositorNodeTransform")
+        place.inputs["Scale"].default_value = g["scale"]
+        place.inputs["Angle"].default_value = g["angle"]
+        tree.links.new(glare.outputs["Glare"], place.inputs["Image"])
+        layers_out.append(place.outputs["Image"])
+    total = image
+    for layer in layers_out:
+        add = tree.nodes.new("ShaderNodeMix")
+        add.data_type = "RGBA"
+        add.blend_type = "ADD"
+        add.inputs["Factor"].default_value = 1.0
+        tree.links.new(total, add.inputs[6])
+        tree.links.new(layer, add.inputs[7])
+        total = add.outputs[2]
+    out = tree.nodes.new("NodeGroupOutput")
+    tree.links.new(total, out.inputs[0])
+    scene.compositing_node_group = tree
+    scene.render.use_compositing = True
+    print(f"[DEMHeadlessRender] Sun glare: threshold {SUN_GLARE_THRESHOLD}, bloom "
+          f"{SUN_GLARE_BLOOM_STRENGTH} (size {SUN_GLARE_BLOOM_SIZE}), starburst "
+          f"{SUN_GLARE_STARBURST_STRENGTH}, {len(ghosts)} ghosts")
     return True
 
 
@@ -444,6 +568,9 @@ def _parse_args():
     p.add_argument("--resume", action="store_true", default=False,
                    help="keep frame_*.png already in --output-dir and render only the missing ones")
     p.add_argument("--video-fps", type=int, default=None)
+    p.add_argument("--no-sun-glare", dest="sun_glare", action="store_false", default=True,
+                   help="skip the Sun bloom, starburst and ghosts (on by default when the scene "
+                        "has a Sun_Visual)")
     args = p.parse_args(argv)
     validate_args(args)
     return args
@@ -558,7 +685,8 @@ def _line_buffer_std_streams() -> None:
 
 
 def render_prepared_scene(scene, *, viz_path, out_dir, res_x, res_y, samples, fps, device,
-                          max_frames=None, slowmo=1, resume=False, encode=False, video_fps=None):
+                          max_frames=None, slowmo=1, resume=False, encode=False, video_fps=None,
+                          sun_glare=True):
     """Cycles settings and the PNG render, after a viz script has built the scene.
 
     The parity test calls this for the hero script (viz_path "per_sphere"), which
@@ -592,6 +720,8 @@ def render_prepared_scene(scene, *, viz_path, out_dir, res_x, res_y, samples, fp
     scene.render.image_settings.file_format = 'PNG'
     scene.render.filepath = str(out_dir) + "/frame_"
     apply_resume(scene, resume)
+    if sun_glare:
+        apply_sun_glare(scene)
 
     print(render_banner(viz_path, scene.frame_start, scene.frame_end, res_x, res_y,
                         samples, device, out_dir))
@@ -643,6 +773,7 @@ def main() -> None:
         bpy.context.scene, viz_path=args.viz_path, out_dir=out_dir, res_x=res_x, res_y=res_y,
         samples=args.samples, fps=args.fps, device=args.device, max_frames=args.max_frames,
         slowmo=args.slowmo, resume=args.resume, encode=args.encode_video, video_fps=args.video_fps,
+        sun_glare=args.sun_glare,
     )
 
 

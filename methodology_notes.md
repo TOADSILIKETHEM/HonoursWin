@@ -308,18 +308,30 @@ ecliptic pole (PHANTOM `set_binary` treats the Horizons node longitude as a posi
 angle, `big_omega = posang_ascnode + π/2`). Nutation and polar motion are left out
 (< 0.01°). Check: at closest approach (21:44 UT, 13 Apr 2029) the sub-Apophis point is
 42.5°W 28.6°N (mid-Atlantic), and Europe/Africa are on the night side. Hyperbola runs (no
-Sun row) keep the sidereal rate, but their time of day is arbitrary. The Atmosphere shell is
-not rotated: it is spherically symmetric. A bodies CSV without `time_s` gets no spin. Blender
+Sun row) use the real orientation at t_real = 2029-04-13 21:46 TDB + (`time_s` minus the
+fitted pericentre time), turned into the scene by the same rotation as the Sun (see
+below). If the fit falls back (fewer than 3 frames or a degenerate orbit), the run keeps the
+arbitrary-epoch Earth orientation, a fixed lamp direction and no Sun visual. The Atmosphere shell is not rotated: it is spherically symmetric. A bodies CSV without `time_s` gets no spin. Blender
 interpolates the quaternion keys per component, which still turns the right way up to 360°
 between keys and backwards beyond it, so `earth_orientation.SpinStepCheck` warns once per run
 when keys are more than 180° of spin apart (uneven) or 360° (backwards).
 
 **Moon and Sun visual body.** A grey UV sphere represents the Moon, scaled to
-`MOON_PHYSICAL_RADIUS_KM × EARTH_VIS_SCALE`. An emissive white UV sphere represents
-the Sun at position scale `SUN_VIS_SCALE = 0.003 BU/km` (much smaller than Earth's
-0.2, to keep the Sun at a navigable distance). The Sun's directional lamp
-(`DEM_SunLight`) is oriented each frame by rotating it to point from Apophis toward
-the physical Sun position from the bodies CSV.
+`MOON_PHYSICAL_RADIUS_KM × EARTH_VIS_SCALE`. The Sun's directional lamp
+(`DEM_SunLight`) is oriented each frame to point from Apophis toward the Sun: the bodies
+CSV `Sun` row for ephemeris runs, or, for hyperbola runs (no `Sun` row), the real 2029
+direction. `sun_geometry.py` fits the Earth-relative hyperbola to every bodies CSV, puts
+the real closest approach (2029-04-13 21:46 TDB, JPL Horizons) at the fitted pericentre,
+and maps the real pericentre frame onto the fitted one; the Sun then turns at the mean
+ecliptic rate. A run with fewer than 3 frames keeps the fixed
+`APOPHIS_ONLY_SUN_DIRECTION`. An emissive white UV sphere (`Sun_Visual`) shows the Sun at
+true angular size: it sits `SUN_VISUAL_DISTANCE_BU = 1.5e7` BU from Apophis along the Sun
+direction, with radius 1.5e7 tan(0.2657 deg). It is visible to the camera only, so the
+lamp alone lights and shadows the scene. Its emission gives the radiance that would
+deliver the lamp's irradiance, L = E / (pi a^2) (a = angular radius), so it clips to
+white like a real exposure; `SUN_DISK_BRIGHTNESS_SCALE` scales it for legibility. The
+headless renders add a compositor Bloom (threshold 100, far above any lit surface) so
+only the Sun glows.
 
 **Viewport clip range.** Both the 3D viewport and all cameras are set to
 `clip_start = 0.1`, `clip_end = 2 000 000 BU` automatically at the end of the script.

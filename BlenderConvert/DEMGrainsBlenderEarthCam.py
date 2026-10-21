@@ -36,6 +36,7 @@ if _BLENDER_CONVERT_DIR not in sys.path:
 if os.path.dirname(_BLENDER_CONVERT_DIR) not in sys.path:
     sys.path.insert(0, os.path.dirname(_BLENDER_CONVERT_DIR))
 import earth_orientation  # noqa: E402
+import sun_geometry  # noqa: E402
 import honours_paths  # noqa: E402  (Code/; where the .blend assets live)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -109,10 +110,8 @@ EARTH_ROTATE_CLOUDS       = True
 MOON_PHYSICAL_RADIUS_KM = 1737.53
 MOON_COLOR              = (0.55, 0.55, 0.55, 1.0)
 
-SUN_VIS_SCALE         = 0.003
-SUN_BODY_RADIUS_BU    = 10000.0
+# Sun visual size, distance and brightness come from sun_geometry.py.
 SUN_COLOR             = (1.0, 1.0, 1.0, 1.0)
-SUN_EMISSION_STRENGTH = 6000.0
 
 VIEWPORT_CLIP_START = 0.1
 VIEWPORT_CLIP_END   = 2000000.0
@@ -777,7 +776,7 @@ if _has_solar_system and _bodies_available and _has_sun_row:
     sun_body_empty      = bpy.context.object
     sun_body_empty.name = 'Sun_Visual'
     bpy.ops.mesh.primitive_uv_sphere_add(
-        radius=SUN_BODY_RADIUS_BU, segments=32, ring_count=16, location=(0.0, 0.0, 0.0)
+        radius=sun_geometry.sun_visual_radius_bu(), segments=32, ring_count=16, location=(0.0, 0.0, 0.0)
     )
     sun_sphere      = bpy.context.object
     sun_sphere.name = 'Sun_Body'
@@ -791,7 +790,7 @@ if _has_solar_system and _bodies_available and _has_sun_row:
             for _inp_name, _inp_val in (
                 ('Emission Color',    SUN_COLOR),
                 ('Emission',          SUN_COLOR),
-                ('Emission Strength', SUN_EMISSION_STRENGTH),
+                ('Emission Strength', sun_geometry.sun_disk_emission_strength(SUN_LAMP_ENERGY)),
             ):
                 if _inp_name in _bsdf.inputs:
                     _bsdf.inputs[_inp_name].default_value = _inp_val
@@ -799,10 +798,17 @@ if _has_solar_system and _bodies_available and _has_sun_row:
         sun_sphere.data.materials[0] = sun_mat
     else:
         sun_sphere.data.materials.append(sun_mat)
+    # Camera only: the sun lamp does the lighting, shadows and reflections.
+    sun_sphere.visible_camera = True
+    sun_sphere.visible_diffuse = False
+    sun_sphere.visible_glossy = False
+    sun_sphere.visible_transmission = False
+    sun_sphere.visible_volume_scatter = False
+    sun_sphere.visible_shadow = False
     _parent_part_to_empty(sun_sphere, sun_body_empty)
     print(
-        f'Sun visual body created — radius {SUN_BODY_RADIUS_BU} BU, '
-        f'position scale {SUN_VIS_SCALE} BU/km'
+        f'Sun visual body created — radius {sun_geometry.sun_visual_radius_bu():.1f} BU '
+        f'at {sun_geometry.SUN_VISUAL_DISTANCE_BU:.3g} BU'
     )
 
 
@@ -990,12 +996,11 @@ for frame_num, grain_file in enumerate(grain_files, start=1):
             if sun_body_empty is not None and not sun_row.empty and not apo_row.empty:
                 sun_km_vis = sun_row[['x_km', 'y_km', 'z_km']].values[0]
                 rel_km     = sun_km_vis - apo_km
-                sun_body_empty.location = (
-                    float(rel_km[0] * SUN_VIS_SCALE),
-                    float(rel_km[1] * SUN_VIS_SCALE),
-                    float(rel_km[2] * SUN_VIS_SCALE),
-                )
-                sun_body_empty.keyframe_insert(data_path='location', frame=frame_num)
+                try:
+                    sun_body_empty.location = sun_geometry.sun_visual_location(rel_km)
+                    sun_body_empty.keyframe_insert(data_path='location', frame=frame_num)
+                except ValueError:
+                    pass  # zero-length direction: keep the previous key
 
 # Grains that join or leave mid-run are hidden while absent. Constant keys
 # switch at the frame, matching the instancing path's present[floor(t)]; keys

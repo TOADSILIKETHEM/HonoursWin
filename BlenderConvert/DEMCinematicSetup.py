@@ -20,6 +20,7 @@ import pandas as pd
 from mathutils import Vector
 
 import earth_orientation
+import sun_geometry
 
 _CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _CODE_DIR not in sys.path:
@@ -46,7 +47,6 @@ EARTH_SPECULAR = 0.25
 EARTH_EMPTY_NAME = 'Earth'
 SUN_LAMP_ENERGY = 10.0
 SUN_LAMP_ANGLE = 0.00931
-SUN_VIS_SCALE = 0.003
 CAMERA_NAME = 'DEM_TrackCam'
 CAMERA_FOV_DEG = 70.0
 CAM_DIST_BU = 150.0
@@ -73,15 +73,14 @@ EARTH_FIXED_SUBSAMPLES = 8  # Earth positions sampled per key interval for the f
 EARTH_CHASE_DROP = 1.0 / 3.0
 EARTH_AIM_NAME = 'DEM_EarthAim'  # Empty on Earth whose Z is the chase camera's screen-up
 CAMERA_MODES = ('earth_track', 'grain_only', 'earth_fixed', 'earth_chase')
-# Below: per-sphere-only scene pieces (DEMGrainsBlenderEarthCam.py values),
-# opt-in via ensure_sun_lamp / ensure_moon / ensure_sun_visual /
-# add_camera_fill_light / apply_viewport_clip so the composite path is unchanged.
+# Below: per-sphere scene pieces (DEMGrainsBlenderEarthCam.py values), opt-in
+# via ensure_sun_lamp / ensure_moon / ensure_sun_visual / add_camera_fill_light /
+# apply_viewport_clip. The composite path takes the lamp and the Sun visual only.
+# The Sun sphere's size, distance and brightness come from sun_geometry.py.
 APOPHIS_ONLY_SUN_DIRECTION = (1.0, 0.0, 0.0)
 MOON_PHYSICAL_RADIUS_KM = 1737.53
 MOON_COLOR = (0.55, 0.55, 0.55, 1.0)
-SUN_BODY_RADIUS_BU = 10000.0
 SUN_COLOR = (1.0, 1.0, 1.0, 1.0)
-SUN_EMISSION_STRENGTH = 6000.0
 CAM_FILL_LIGHT_NAME = 'DEM_CamFill'
 CAM_FILL_LIGHT_TYPE = 'POINT'
 CAM_FILL_LIGHT_ENERGY = 20000.0
@@ -308,6 +307,13 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
     e.g. a manifest covering only the tail of a run (a close-approach window)
     needs this to be the real CSV index of its first frame, not 0.
 
+    Sun: an ephemeris run (Sun row) keys the lamp at the Sun row's direction.
+    A hyperbola run (Earth row, no Sun row) keys the lamp, the Sun visual and
+    Earth's orientation from the real 2029 flyby, mapped onto the run's orbit by
+    sun_geometry.hyperbola_frame_from_bodies_dir() -- fitted once from every CSV
+    in ``bodies_dir``, not just the window from ``start_index``. If that fit is
+    unavailable the lamp keeps ensure_sun_lamp()'s fixed direction.
+
     Calls ``scene.frame_set()`` per frame while keyframing -- if a caller has
     already enabled Blender's time remap (``render.frame_map_old/new``, e.g. for
     a slow-motion stretch), those calls sample at the *remapped* time, not the
@@ -331,8 +337,16 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
     if n == 0:
         return earth_empty
 
+    names = bodies_row_names(bodies_dir)
+    hyperbola = 'Sun' not in names and 'Earth' in names
+    sun_frame = sun_geometry.hyperbola_frame_from_bodies_dir(bodies_dir) if hyperbola else None
+    if hyperbola and sun_frame is None:
+        print('WARNING: hyperbola Sun fit unavailable (fewer than 3 frames or degenerate orbit); '
+              'using fixed lamp direction, no Sun visual')
+
     spin_check = earth_orientation.SpinStepCheck()
     spin_logged = False
+    max_earth_bu = 0.0
 
     for i in range(n):
         frame = bpy.context.scene.frame_start + i
@@ -350,19 +364,25 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
             ez = (float(earth['z_km']) - float(apo['z_km'])) * EARTH_VIS_SCALE
             earth_empty.location = (ex, ey, ez)
             earth_empty.keyframe_insert(data_path='location', frame=frame)
+            max_earth_bu = max(max_earth_bu, math.sqrt(ex * ex + ey * ey + ez * ez))
             if 'time_s' in earth.index and pd.notna(earth['time_s']):
                 t_s = float(earth['time_s'])
                 if not spin_logged:
                     spin_logged = True
                     if 'Sun' in df['name'].values:
                         print(f'Earth time-of-day: epoch {EARTH_EPOCH_TDB} TDB + time_s.')
+                    elif sun_frame is not None:
+                        print('Earth time-of-day: real 2029 (hyperbola mapped to closest approach)')
                     else:
                         print('Earth time-of-day: arbitrary (no Sun row, e.g. hyperbola); '
                               'spin rate still sidereal.')
                 warning = spin_check.warning(t_s, frame)
                 if warning:
                     print(warning)
-                q = mathutils.Quaternion(earth_orientation.earth_quaternion(t_s, EARTH_EPOCH_TDB))
+                if sun_frame is not None:
+                    q = mathutils.Quaternion(sun_geometry.earth_quaternion_scene(sun_frame, t_s))
+                else:
+                    q = mathutils.Quaternion(earth_orientation.earth_quaternion(t_s, EARTH_EPOCH_TDB))
                 for child in earth_empty.children_recursive:
                     if child.name.startswith('Surface') or child.name.startswith('Clouds'):
                         child.rotation_quaternion = q
@@ -378,6 +398,17 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
                 direction.normalize()
                 sun_lamp.rotation_euler = (-direction).to_track_quat('-Z', 'Y').to_euler()
                 sun_lamp.keyframe_insert(data_path='rotation_euler', frame=frame)
+        elif sun_frame is not None:
+            direction = Vector(sun_geometry.sun_direction_scene(sun_frame, float(apo['time_s'])))
+            if sun_lamp is not None:
+                sun_lamp.rotation_euler = (-direction).to_track_quat('-Z', 'Y').to_euler()
+                sun_lamp.keyframe_insert(data_path='rotation_euler', frame=frame)
+            if sun_body is not None:
+                try:
+                    sun_body.location = sun_geometry.sun_visual_location(direction)
+                    sun_body.keyframe_insert(data_path='location', frame=frame)
+                except ValueError:
+                    pass
 
         if moon_empty is not None and 'Moon' in df['name'].values:
             moon = df[df['name'] == 'Moon'].iloc[0]
@@ -389,11 +420,22 @@ def keyframe_bodies_and_earth(bodies_dir, frame_count, has_solar, earth_empty=No
 
         if sun_body is not None and 'Sun' in df['name'].values:
             sun = df[df['name'] == 'Sun'].iloc[0]
-            sx = (float(sun['x_km']) - float(apo['x_km'])) * SUN_VIS_SCALE
-            sy = (float(sun['y_km']) - float(apo['y_km'])) * SUN_VIS_SCALE
-            sz = (float(sun['z_km']) - float(apo['z_km'])) * SUN_VIS_SCALE
-            sun_body.location = (sx, sy, sz)
-            sun_body.keyframe_insert(data_path='location', frame=frame)
+            try:
+                sun_body.location = sun_geometry.sun_visual_location((
+                    float(sun['x_km']) - float(apo['x_km']),
+                    float(sun['y_km']) - float(apo['y_km']),
+                    float(sun['z_km']) - float(apo['z_km']),
+                ))
+                sun_body.keyframe_insert(data_path='location', frame=frame)
+            except ValueError:
+                pass  # zero-length direction: keep the previous key
+
+    # The Sun visual sits SUN_VISUAL_DISTANCE_BU from Apophis; Earth must stay well
+    # inside that (a tenth) so the sphere sits beyond Earth on every frame.
+    occlude_bu = sun_geometry.SUN_VISUAL_DISTANCE_BU / 10.0
+    if max_earth_bu > occlude_bu:
+        print(f'WARNING: Earth keyed {max_earth_bu:.4g} BU from Apophis, beyond '
+              f'SUN_VISUAL_DISTANCE_BU / 10 = {occlude_bu:.4g} BU; it may occlude the Sun visual.')
 
     return earth_empty
 
@@ -643,7 +685,9 @@ def ensure_sun_lamp(has_solar, bodies_dir):
 
     Solar-system run with a Sun row: plain lamp, keyframed later by
     keyframe_bodies_and_earth(). No Sun row (hyperbola) or apophis_only: fixed
-    APOPHIS_ONLY_SUN_DIRECTION. Solar-system run without a bodies dir: none.
+    APOPHIS_ONLY_SUN_DIRECTION; on a hyperbola run whose orbit fits, the keys
+    from keyframe_bodies_and_earth() override it with the real 2029 Sun.
+    Solar-system run without a bodies dir: none.
     """
     existing = bpy.data.objects.get('DEM_SunLight')
     if existing is not None:
@@ -693,8 +737,18 @@ def ensure_moon(has_solar, bodies_dir):
 
 
 def ensure_sun_visual(has_solar, bodies_dir):
-    """Emissive Sun sphere under a 'Sun_Visual' Empty, only when the bodies CSV has a Sun row."""
-    if not has_solar or 'Sun' not in bodies_row_names(bodies_dir):
+    """Emissive Sun sphere under a 'Sun_Visual' Empty, seen by the camera only.
+
+    Made when the bodies CSV has a Sun row (ephemeris) or the run's hyperbola
+    fits (sun_geometry.hyperbola_frame_from_bodies_dir); none for apophis_only or
+    a hyperbola too short to fit. Its radius subtends the real 2029 angular
+    radius at sun_geometry.SUN_VISUAL_DISTANCE_BU, where keyframe_bodies_and_earth()
+    places it. It casts no light, shadow or reflection: the sun lamp does that.
+    """
+    if not has_solar or not bodies_dir or not os.path.isdir(bodies_dir):
+        return None
+    if ('Sun' not in bodies_row_names(bodies_dir)
+            and sun_geometry.hyperbola_frame_from_bodies_dir(bodies_dir) is None):
         return None
     if bpy.data.objects.get('Sun_Visual') is not None:
         return bpy.data.objects['Sun_Visual']
@@ -705,11 +759,20 @@ def ensure_sun_visual(has_solar, bodies_dir):
         bsdf = mat.node_tree.nodes.get('Principled BSDF')
         if bsdf:
             bsdf.inputs['Base Color'].default_value = SUN_COLOR
+            strength = sun_geometry.sun_disk_emission_strength(SUN_LAMP_ENERGY)
             for name, val in (('Emission Color', SUN_COLOR), ('Emission', SUN_COLOR),
-                              ('Emission Strength', SUN_EMISSION_STRENGTH)):
+                              ('Emission Strength', strength)):
                 if name in bsdf.inputs:
                     bsdf.inputs[name].default_value = val
-    return _body_sphere('Sun_Visual', 'Sun_Body', SUN_BODY_RADIUS_BU, mat)
+    empty = _body_sphere('Sun_Visual', 'Sun_Body', sun_geometry.sun_visual_radius_bu(), mat)
+    sphere = empty.children[0]
+    sphere.visible_camera = True
+    sphere.visible_diffuse = False
+    sphere.visible_glossy = False
+    sphere.visible_transmission = False
+    sphere.visible_volume_scatter = False
+    sphere.visible_shadow = False
+    return empty
 
 
 def add_camera_fill_light(cam_obj):
